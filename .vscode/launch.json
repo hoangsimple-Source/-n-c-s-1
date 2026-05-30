@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "Run LoginForm (JDBC)",
+      "request": "launch",
+      "mainClass": "LoginForm",
+      "classPaths": [
+        "${workspaceFolder}/bin",
+        "${workspaceFolder}",
+        "${workspaceFolder}/lib/*",
+        "${workspaceFolder}/lib/mssql-jdbc-13.2.1.jre11.jar"
+      ]
+    }
+  ]
+}
