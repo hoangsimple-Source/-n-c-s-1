@@ -3,15 +3,18 @@
   "configurations": [
     {
       "type": "java",
-      "name": "Run LoginForm (JDBC)",
+      "name": "Run LoginForm",
       "request": "launch",
       "mainClass": "LoginForm",
+      "preLaunchTask": "Compile Java Sources",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
       "classPaths": [
         "${workspaceFolder}/bin",
-        "${workspaceFolder}",
-        "${workspaceFolder}/lib/*",
         "${workspaceFolder}/lib/mssql-jdbc-13.2.1.jre11.jar"
-      ]
+      ],
+      "stopOnEntry": false,
+      "internalConsoleOptions": "neverOpen"
     }
   ]
 }

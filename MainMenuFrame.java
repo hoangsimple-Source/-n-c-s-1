@@ -15,6 +15,7 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 
+
 public class MainMenuFrame extends JFrame {
     private static final String APP_TITLE = "Hệ thống quản lí kinh doanh nội bộ công ty TECOFFEE";
 
@@ -30,7 +31,7 @@ public class MainMenuFrame extends JFrame {
     private static final String MENU_ORDER_RECEIVING = "Tiếp nhận đơn hàng";
     private static final String MENU_STOCK_CHECK = "Kiểm tra kho hàng";
     private static final String MENU_FEATURE_3 = "Đóng gói & Vận chuyển";
-    private static final String MENU_FEATURE_4 = "Chức năng 4";
+    private static final String MENU_FEATURE_4 = "Thống kê lợi nhuận";
 
     private static final int MENU_BUTTON_WIDTH = 230;
     private static final int MENU_BUTTON_HEIGHT = 42;
@@ -45,10 +46,11 @@ public class MainMenuFrame extends JFrame {
     private final JPanel contentPanel;
     private final Map<String, JButton> menuButtons = new LinkedHashMap<>();
     private final StockCheckPanel stockCheckPanel;
-    private final HomeDashboardPanel homeDashboardPanel;
+    private final JPanel homeInfoPanel;
+    private final ProfitStatisticsPanel profitStatisticsPanel;
     private final OrderPlacementPanel orderPlacementPanel;
-    private final OrderReceivingPanel orderReceivingPanel;
-    private final PackagingShippingPanel packagingShippingPanel;
+    private final JPanel orderReceivingPanel;
+    private final JPanel packagingShippingPanel;
 
     public MainMenuFrame(String managerId, String managerName) {
         setTitle(APP_TITLE);
@@ -61,25 +63,88 @@ public class MainMenuFrame extends JFrame {
         root.setBackground(UiTheme.APP_BG);
         root.add(buildLeftMenu(managerId, managerName), BorderLayout.WEST);
 
-        homeDashboardPanel = new HomeDashboardPanel(managerId, managerName);
+        homeInfoPanel = createHomeInfoPanel();
+        profitStatisticsPanel = new ProfitStatisticsPanel(managerId, managerName);
         orderPlacementPanel = new OrderPlacementPanel(() -> showCard(CARD_ORDER_RECEIVING));
-        orderReceivingPanel = new OrderReceivingPanel();
+        orderReceivingPanel = createPanelSafely("OrderReceivingPanel");
         stockCheckPanel = new StockCheckPanel(managerId, managerName);
-        packagingShippingPanel = new PackagingShippingPanel();
+        packagingShippingPanel = createPanelSafely("PackagingShippingPanel");
+            setOrderConfirmedCallbackSafely(orderReceivingPanel, () -> {
+                try {
+                    java.lang.reflect.Method m = packagingShippingPanel.getClass().getMethod("refreshFromDb");
+                    m.invoke(packagingShippingPanel);
+                } catch (Throwable ignored) {
+                }
+            });
 
         contentLayout = new CardLayout();
         contentPanel = new JPanel(contentLayout);
         contentPanel.setBackground(UiTheme.APP_BG);
-        contentPanel.add(homeDashboardPanel, CARD_HOME);
+        contentPanel.add(homeInfoPanel, CARD_HOME);
         contentPanel.add(orderPlacementPanel, CARD_ORDER_PLACEMENT);
         contentPanel.add(orderReceivingPanel, CARD_ORDER_RECEIVING);
         contentPanel.add(stockCheckPanel, CARD_STOCK_CHECK);
         contentPanel.add(packagingShippingPanel, CARD_FEATURE_3);
-        contentPanel.add(createFeaturePanel(MENU_FEATURE_4, "TODO: Thêm nội dung chức năng 4."), CARD_FEATURE_4);
+        contentPanel.add(profitStatisticsPanel, CARD_FEATURE_4);
         root.add(contentPanel, BorderLayout.CENTER);
 
         setContentPane(root);
         showCard(CARD_HOME);
+    }
+
+    private JPanel createHomeInfoPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createEmptyBorder(22, 24, 22, 24));
+        panel.setBackground(UiTheme.APP_BG);
+
+        JLabel titleLabel = UiTheme.pageTitle("Trang chủ");
+        panel.add(titleLabel, BorderLayout.NORTH);
+
+        JLabel messageLabel = new JLabel(
+            "<html><div style='font-size: 14px; padding-top: 8px;'>Trang chủ sẽ được cập nhật sau.</div></html>"
+        );
+        panel.add(messageLabel, BorderLayout.CENTER);
+        return panel;
+    }
+
+    private JPanel createPanelSafely(String className) {
+        try {
+            Class<?> cls = Class.forName(className);
+            Object obj = cls.getDeclaredConstructor().newInstance();
+            if (obj instanceof JPanel) {
+                return (JPanel) obj;
+            }
+        } catch (Throwable ignored) {
+            // Fall through to placeholder
+        }
+        JPanel placeholder = new JPanel(new BorderLayout());
+        placeholder.setOpaque(false);
+        JLabel label = new JLabel("Module '" + className + "' không khả dụng");
+        label.setFont(UiTheme.font(Font.PLAIN, 14));
+        label.setForeground(UiTheme.MUTED_TEXT);
+        placeholder.add(label, BorderLayout.CENTER);
+        return placeholder;
+    }
+
+    private void invokeRefreshIfPresent(Object panel) {
+        if (panel == null) return;
+        try {
+            java.lang.reflect.Method m = panel.getClass().getMethod("refreshData");
+            m.invoke(panel);
+        } catch (NoSuchMethodException e) {
+            // ignore - no refresh method
+        } catch (Throwable ignored) {
+            // ignore other invocation issues
+        }
+    }
+
+    private void setOrderConfirmedCallbackSafely(Object panel, Runnable cb) {
+        if (panel == null) return;
+        try {
+            java.lang.reflect.Method m = panel.getClass().getMethod("setOnOrderConfirmedCallback", Runnable.class);
+            m.invoke(panel, cb);
+        } catch (Throwable ignored) {
+        }
     }
 
     private JPanel buildLeftMenu(String managerId, String managerName) {
@@ -181,7 +246,7 @@ public class MainMenuFrame extends JFrame {
 
     private void showCard(String cardName) {
         if (CARD_HOME.equals(cardName)) {
-            homeDashboardPanel.refreshData();
+            // Home panel is now empty placeholder
         }
         if (CARD_STOCK_CHECK.equals(cardName)) {
             stockCheckPanel.refreshData();
@@ -190,7 +255,10 @@ public class MainMenuFrame extends JFrame {
             orderPlacementPanel.refreshData();
         }
         if (CARD_ORDER_RECEIVING.equals(cardName)) {
-            orderReceivingPanel.refreshData();
+            invokeRefreshIfPresent(orderReceivingPanel);
+        }
+        if (CARD_FEATURE_4.equals(cardName)) {
+            profitStatisticsPanel.refreshData();
         }
         contentLayout.show(contentPanel, cardName);
         updateActiveMenuButton(cardName);

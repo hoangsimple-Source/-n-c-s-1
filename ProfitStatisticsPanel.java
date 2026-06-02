@@ -8,17 +8,20 @@ import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
+import java.awt.GridLayout;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.Date;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.text.DecimalFormat;
 import java.text.Normalizer;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -42,7 +45,7 @@ import javax.swing.JScrollPane;
 import javax.swing.SwingUtilities;
 // import javax.swing.SwingConstants;
 
-public class HomeDashboardPanel extends JPanel {
+public class ProfitStatisticsPanel extends JPanel {
     private static final String SQLSERVER_DRIVER = "com.microsoft.sqlserver.jdbc.SQLServerDriver";
     private static final String DB_URL = System.getenv().getOrDefault(
         "DB_URL",
@@ -51,25 +54,40 @@ public class HomeDashboardPanel extends JPanel {
     private static final String DB_USER = System.getenv().getOrDefault("DB_USER", "sa");
     private static final String DB_PASSWORD = System.getenv().getOrDefault("DB_PASSWORD", "123456");
 
-    private static final String STOCK_ACTION_IN = "Nh\u1EADp";
-    private static final String STOCK_ACTION_OUT = "Xu\u1EA5t";
+    private static final String STOCK_ACTION_IN = "Nhập";
+    private static final String STOCK_ACTION_OUT = "Xuất";
 
     private static final DateTimeFormatter DATE_LABEL_FORMAT = DateTimeFormatter.ofPattern("dd/MM");
+    private static final DateTimeFormatter MONTH_LABEL_FORMAT = DateTimeFormatter.ofPattern("MM/yyyy");
+    private static final DecimalFormat MONEY_FORMAT = new DecimalFormat("#,##0.###");
+    private static final int RECENT_MONTH_LIMIT = 3;
 
     private final JComboBox<GoodsOption> goodsSelector = new JComboBox<>();
     private final FlowLineChartPanel flowChartPanel = new FlowLineChartPanel();
     private final TrendBarChartPanel trendChartPanel = new TrendBarChartPanel();
+    private final MonthlyProfitLineChartPanel monthlyProfitChartPanel = new MonthlyProfitLineChartPanel();
+    private final QuarterRevenueCostChartPanel quarterRevenueCostChartPanel = new QuarterRevenueCostChartPanel();
     private final JComboBox<String> trendGoodsSelector = new JComboBox<>();
+    private final JLabel dailyProfitValueLabel = new JLabel("0 triệu VND");
+    private final JLabel dailyOrdersValueLabel = new JLabel("0 đơn hàng đã xử lí hôm nay");
+    private final JLabel monthlyProfitValueLabel = new JLabel("Tổng lợi nhuận tháng: 0 triệu VND");
+    private final JLabel quarterRevenueValueLabel = new JLabel("Tổng doanh thu: 0 triệu VND");
+    private final JLabel quarterCostValueLabel = new JLabel("Tổng chi phí: 0 triệu VND");
+    private final JLabel quarterProfitValueLabel = new JLabel("Tổng lợi nhuận: 0 triệu VND");
     private final JPanel contentPanel = new JPanel();
     private final JScrollPane contentScrollPane;
 
+    private JPanel profitSummarySectionPanel;
+    private JPanel dailyProfitSectionPanel;
+    private JPanel monthlyProfitSectionPanel;
+    private JPanel quarterRevenueCostSectionPanel;
     private JPanel flowSectionPanel;
     private JPanel trendSectionPanel;
     private JScrollPane trendChartScrollPane;
     private boolean updatingGoodsModel;
     private boolean updatingTrendSelector;
 
-    public HomeDashboardPanel(String managerId, String managerName) {
+    public ProfitStatisticsPanel(String managerId, String managerName) {
         setLayout(new BorderLayout(10, 10));
         setBackground(UiTheme.APP_BG);
         setBorder(BorderFactory.createEmptyBorder(16, 16, 16, 16));
@@ -80,9 +98,15 @@ public class HomeDashboardPanel extends JPanel {
         contentPanel.setLayout(new BoxLayout(contentPanel, BoxLayout.Y_AXIS));
         contentPanel.setOpaque(false);
 
+        profitSummarySectionPanel = buildProfitSummarySection();
+        quarterRevenueCostSectionPanel = buildQuarterRevenueCostSection();
         flowSectionPanel = buildFlowSection();
         trendSectionPanel = buildTrendSection();
 
+        contentPanel.add(profitSummarySectionPanel);
+        contentPanel.add(Box.createVerticalStrut(16));
+        contentPanel.add(quarterRevenueCostSectionPanel);
+        contentPanel.add(Box.createVerticalStrut(16));
         contentPanel.add(flowSectionPanel);
         contentPanel.add(Box.createVerticalStrut(16));
         contentPanel.add(trendSectionPanel);
@@ -109,18 +133,24 @@ public class HomeDashboardPanel extends JPanel {
 
     public void refreshData() {
         try {
+            loadProfitSummaryData();
+            loadQuarterRevenueCostData();
             loadGoodsSelectorData();
             loadFlowChartData();
             loadTrendChartData();
         } catch (SQLException ex) {
             JOptionPane.showMessageDialog(
                 this,
-                "Không thể tải dữ liệu Trang chủ. Chi tiết: " + ex.getMessage(),
+                "Không thể tải dữ liệu Thống kê lợi nhuận. Chi tiết: " + ex.getMessage(),
                 "Lỗi dữ liệu",
                 JOptionPane.ERROR_MESSAGE
             );
             flowChartPanel.setData(Collections.emptyList());
             trendChartPanel.setData(Collections.emptyList());
+            monthlyProfitChartPanel.setData(Collections.emptyList());
+            quarterRevenueCostChartPanel.setData(Collections.emptyList());
+            setProfitSummary(BigDecimal.ZERO, 0, BigDecimal.ZERO);
+            setQuarterSummary(BigDecimal.ZERO, BigDecimal.ZERO);
         }
     }
 
@@ -133,6 +163,8 @@ public class HomeDashboardPanel extends JPanel {
         quickLabel.setForeground(UiTheme.TEXT);
         quickMenu.add(quickLabel);
 
+        quickMenu.add(createSectionButton("Lợi nhuận", () -> scrollToSection(profitSummarySectionPanel)));
+        quickMenu.add(createSectionButton("Doanh thu & chi phí", () -> scrollToSection(quarterRevenueCostSectionPanel)));
         quickMenu.add(createSectionButton("Biểu đồ lưu lượng", () -> scrollToSection(flowSectionPanel)));
         quickMenu.add(createSectionButton("Biểu đồ xu hướng", () -> scrollToSection(trendSectionPanel)));
         quickMenu.add(createSectionButton("Làm mới dữ liệu", this::refreshData));
@@ -147,8 +179,102 @@ public class HomeDashboardPanel extends JPanel {
         return button;
     }
 
+    private JPanel buildProfitSummarySection() {
+        JPanel row = new JPanel(new GridLayout(1, 2, 16, 0));
+        row.setAlignmentX(LEFT_ALIGNMENT);
+        row.setOpaque(false);
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 340));
+        row.setPreferredSize(new Dimension(900, 320));
+
+        dailyProfitSectionPanel = createSectionContainer("Lợi nhuận trong ngày");
+        dailyProfitSectionPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 320));
+        dailyProfitSectionPanel.setPreferredSize(new Dimension(430, 300));
+
+        JPanel dailyBody = new JPanel();
+        dailyBody.setOpaque(false);
+        dailyBody.setLayout(new BoxLayout(dailyBody, BoxLayout.Y_AXIS));
+        dailyBody.setBorder(BorderFactory.createEmptyBorder(44, 18, 18, 18));
+
+        dailyProfitValueLabel.setFont(UiTheme.font(Font.BOLD, 34));
+        dailyProfitValueLabel.setForeground(UiTheme.TEAL_DARK);
+        dailyProfitValueLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        dailyBody.add(dailyProfitValueLabel);
+        dailyBody.add(Box.createVerticalStrut(12));
+
+        dailyOrdersValueLabel.setFont(UiTheme.font(Font.PLAIN, 15));
+        dailyOrdersValueLabel.setForeground(UiTheme.MUTED_TEXT);
+        dailyOrdersValueLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        dailyBody.add(dailyOrdersValueLabel);
+        dailyBody.add(Box.createVerticalGlue());
+
+        JLabel formulaLabel = new JLabel("Công thức: (Giá bán - Giá nhập) x số lượng xuất");
+        formulaLabel.setFont(UiTheme.font(Font.PLAIN, 13));
+        formulaLabel.setForeground(new Color(95, 104, 124));
+        formulaLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        dailyBody.add(formulaLabel);
+
+        dailyProfitSectionPanel.add(dailyBody, BorderLayout.CENTER);
+
+        monthlyProfitSectionPanel = createSectionContainer("Lợi nhuận theo tháng");
+        monthlyProfitSectionPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 320));
+        monthlyProfitSectionPanel.setPreferredSize(new Dimension(430, 300));
+
+        monthlyProfitValueLabel.setFont(UiTheme.font(Font.BOLD, 15));
+        monthlyProfitValueLabel.setForeground(UiTheme.TEXT);
+        monthlyProfitValueLabel.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+        monthlyProfitSectionPanel.add(monthlyProfitValueLabel, BorderLayout.NORTH);
+        monthlyProfitSectionPanel.add(monthlyProfitChartPanel, BorderLayout.CENTER);
+
+        row.add(dailyProfitSectionPanel);
+        row.add(monthlyProfitSectionPanel);
+        return row;
+    }
+
+    private JPanel buildQuarterRevenueCostSection() {
+        JPanel section = createSectionContainer("Doanh thu và chi phí theo quý");
+        section.setPreferredSize(new Dimension(900, 430));
+        section.setMaximumSize(new Dimension(Integer.MAX_VALUE, 480));
+
+        JLabel note = new JLabel("Biểu đồ cột kép theo 3 tháng trong quý hiện tại.");
+        note.setFont(UiTheme.font(Font.PLAIN, 13));
+        note.setForeground(UiTheme.MUTED_TEXT);
+        note.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+        section.add(note, BorderLayout.NORTH);
+
+        section.add(quarterRevenueCostChartPanel, BorderLayout.CENTER);
+
+        JPanel summaryPanel = new JPanel(new GridLayout(3, 1, 0, 4));
+        summaryPanel.setOpaque(false);
+        summaryPanel.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
+        styleQuarterSummaryLabel(quarterRevenueValueLabel, UiTheme.TEAL_DARK);
+        styleQuarterSummaryLabel(quarterCostValueLabel, new Color(146, 76, 27));
+        styleQuarterSummaryLabel(quarterProfitValueLabel, UiTheme.TEXT);
+        summaryPanel.add(quarterRevenueValueLabel);
+        summaryPanel.add(quarterCostValueLabel);
+        summaryPanel.add(quarterProfitValueLabel);
+        section.add(summaryPanel, BorderLayout.SOUTH);
+
+        return section;
+    }
+
+    private void styleQuarterSummaryLabel(JLabel label, Color color) {
+        label.setFont(UiTheme.font(Font.BOLD, 14));
+        label.setForeground(color);
+    }
+
     private JPanel buildFlowSection() {
         JPanel section = createSectionContainer("Biểu đồ lưu lượng");
+
+        JPanel topPanel = new JPanel();
+        topPanel.setOpaque(false);
+        topPanel.setLayout(new BoxLayout(topPanel, BoxLayout.Y_AXIS));
+
+        JLabel note = new JLabel("Dữ liệu biểu đồ lưu lượng chỉ hiển thị trong 3 tháng gần nhất.");
+        note.setFont(UiTheme.font(Font.PLAIN, 13));
+        note.setForeground(UiTheme.MUTED_TEXT);
+        note.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+        note.setAlignmentX(Component.LEFT_ALIGNMENT);
+        topPanel.add(note);
 
         JPanel filterBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         filterBar.setOpaque(false);
@@ -156,8 +282,10 @@ public class HomeDashboardPanel extends JPanel {
         goodsSelector.setPreferredSize(new Dimension(260, 28));
         UiTheme.styleField(goodsSelector);
         filterBar.add(goodsSelector);
+        filterBar.setAlignmentX(Component.LEFT_ALIGNMENT);
+        topPanel.add(filterBar);
 
-        section.add(filterBar, BorderLayout.NORTH);
+        section.add(topPanel, BorderLayout.NORTH);
 
         JScrollPane chartScroll = new JScrollPane(
             flowChartPanel,
@@ -178,7 +306,7 @@ public class HomeDashboardPanel extends JPanel {
         topPanel.setOpaque(false);
         topPanel.setLayout(new BoxLayout(topPanel, BoxLayout.Y_AXIS));
 
-        JLabel desc = new JLabel("Số lượng phiếu bán ra (phiếu xuất) của tất cả hàng hóa");
+        JLabel desc = new JLabel("Số lượng phiếu bán ra (phiếu xuất) của tất cả hàng hóa trong 3 tháng gần nhất");
         desc.setFont(UiTheme.font(Font.PLAIN, 13));
         desc.setForeground(UiTheme.MUTED_TEXT);
         desc.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
@@ -330,6 +458,156 @@ public class HomeDashboardPanel extends JPanel {
         updatingGoodsModel = false;
     }
 
+    private void loadProfitSummaryData() throws SQLException {
+        ensureSqlServerDriverLoaded();
+
+        LocalDate today = LocalDate.now();
+        LocalDate monthStart = today.withDayOfMonth(1);
+        LocalDate nextMonthStart = monthStart.plusMonths(1);
+
+        BigDecimal dailyProfit = BigDecimal.ZERO;
+        int dailyOrders = 0;
+        String dailySql =
+            "SELECT COALESCE(SUM((COALESCE(g.GiaBan, 0) - COALESCE(g.GiaNhap, 0)) * i.SoLuong), 0) AS LoiNhuan, " +
+            "       COUNT(*) AS SoDonHang " +
+            "FROM InOut i " +
+            "INNER JOIN Goods g ON g.MaHang = i.MaHang " +
+            "WHERE i.LoaiPhieu = ? " +
+            "  AND COALESCE(g.LaHangBan, 0) <> 0 " +
+            "  AND CAST(i.NgayPhieu AS date) = ?";
+
+        List<ProfitPoint> monthlyPoints = new ArrayList<>();
+        BigDecimal monthlyTotal = BigDecimal.ZERO;
+        String monthlySql =
+            "SELECT CAST(i.NgayPhieu AS date) AS Ngay, " +
+            "       COALESCE(SUM((COALESCE(g.GiaBan, 0) - COALESCE(g.GiaNhap, 0)) * i.SoLuong), 0) AS LoiNhuan " +
+            "FROM InOut i " +
+            "INNER JOIN Goods g ON g.MaHang = i.MaHang " +
+            "WHERE i.LoaiPhieu = ? " +
+            "  AND COALESCE(g.LaHangBan, 0) <> 0 " +
+            "  AND i.NgayPhieu >= ? " +
+            "  AND i.NgayPhieu < ? " +
+            "GROUP BY CAST(i.NgayPhieu AS date) " +
+            "ORDER BY Ngay";
+
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
+            try (PreparedStatement stmt = conn.prepareStatement(dailySql)) {
+                stmt.setString(1, STOCK_ACTION_OUT);
+                stmt.setDate(2, Date.valueOf(today));
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        dailyProfit = readMoney(rs, "LoiNhuan");
+                        dailyOrders = rs.getInt("SoDonHang");
+                    }
+                }
+            }
+
+            try (PreparedStatement stmt = conn.prepareStatement(monthlySql)) {
+                stmt.setString(1, STOCK_ACTION_OUT);
+                stmt.setDate(2, Date.valueOf(monthStart));
+                stmt.setDate(3, Date.valueOf(nextMonthStart));
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        Date date = rs.getDate("Ngay");
+                        BigDecimal profit = readMoney(rs, "LoiNhuan");
+                        if (date != null) {
+                            monthlyPoints.add(new ProfitPoint(date.toLocalDate(), profit));
+                            monthlyTotal = monthlyTotal.add(profit);
+                        }
+                    }
+                }
+            }
+        }
+
+        setProfitSummary(dailyProfit, dailyOrders, monthlyTotal);
+        monthlyProfitChartPanel.setData(monthlyPoints);
+    }
+
+    private void setProfitSummary(BigDecimal dailyProfit, int dailyOrders, BigDecimal monthlyTotal) {
+        dailyProfitValueLabel.setText(formatMoney(dailyProfit) + " triệu VND");
+        dailyOrdersValueLabel.setText(dailyOrders + " đơn hàng đã xử lí hôm nay");
+        monthlyProfitValueLabel.setText("Tổng lợi nhuận tháng: " + formatMoney(monthlyTotal) + " triệu VND");
+    }
+
+    private void loadQuarterRevenueCostData() throws SQLException {
+        ensureSqlServerDriverLoaded();
+
+        LocalDate today = LocalDate.now();
+        int quarterStartMonth = ((today.getMonthValue() - 1) / 3) * 3 + 1;
+        LocalDate quarterStart = LocalDate.of(today.getYear(), quarterStartMonth, 1);
+        LocalDate nextQuarterStart = quarterStart.plusMonths(3);
+
+        List<RevenueCostPoint> points = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            LocalDate month = quarterStart.plusMonths(i);
+            points.add(new RevenueCostPoint(month.format(MONTH_LABEL_FORMAT), BigDecimal.ZERO, BigDecimal.ZERO));
+        }
+
+        String sql =
+            "SELECT YEAR(i.NgayPhieu) AS Nam, " +
+            "       MONTH(i.NgayPhieu) AS Thang, " +
+            "       COALESCE(SUM(COALESCE(g.GiaBan, 0) * i.SoLuong), 0) AS DoanhThu, " +
+            "       COALESCE(SUM(COALESCE(g.GiaNhap, 0) * i.SoLuong), 0) AS ChiPhi " +
+            "FROM InOut i " +
+            "INNER JOIN Goods g ON g.MaHang = i.MaHang " +
+            "WHERE i.LoaiPhieu = ? " +
+            "  AND COALESCE(g.LaHangBan, 0) <> 0 " +
+            "  AND i.NgayPhieu >= ? " +
+            "  AND i.NgayPhieu < ? " +
+            "GROUP BY YEAR(i.NgayPhieu), MONTH(i.NgayPhieu) " +
+            "ORDER BY Nam, Thang";
+
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, STOCK_ACTION_OUT);
+            stmt.setDate(2, Date.valueOf(quarterStart));
+            stmt.setDate(3, Date.valueOf(nextQuarterStart));
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    int year = rs.getInt("Nam");
+                    int monthValue = rs.getInt("Thang");
+                    int index = (year == today.getYear()) ? monthValue - quarterStartMonth : -1;
+                    if (index >= 0 && index < points.size()) {
+                        LocalDate month = LocalDate.of(year, monthValue, 1);
+                        points.set(index, new RevenueCostPoint(
+                            month.format(MONTH_LABEL_FORMAT),
+                            readMoney(rs, "DoanhThu"),
+                            readMoney(rs, "ChiPhi")
+                        ));
+                    }
+                }
+            }
+        }
+
+        BigDecimal totalRevenue = BigDecimal.ZERO;
+        BigDecimal totalCost = BigDecimal.ZERO;
+        for (RevenueCostPoint point : points) {
+            totalRevenue = totalRevenue.add(point.revenue);
+            totalCost = totalCost.add(point.cost);
+        }
+
+        quarterRevenueCostChartPanel.setData(points);
+        setQuarterSummary(totalRevenue, totalCost);
+    }
+
+    private void setQuarterSummary(BigDecimal totalRevenue, BigDecimal totalCost) {
+        BigDecimal safeRevenue = totalRevenue == null ? BigDecimal.ZERO : totalRevenue;
+        BigDecimal safeCost = totalCost == null ? BigDecimal.ZERO : totalCost;
+        quarterRevenueValueLabel.setText("Tổng doanh thu: " + formatMoney(safeRevenue) + " triệu VND");
+        quarterCostValueLabel.setText("Tổng chi phí: " + formatMoney(safeCost) + " triệu VND");
+        quarterProfitValueLabel.setText("Tổng lợi nhuận: " + formatMoney(safeRevenue.subtract(safeCost)) + " triệu VND");
+    }
+
+    private BigDecimal readMoney(ResultSet rs, String column) throws SQLException {
+        BigDecimal value = rs.getBigDecimal(column);
+        return value == null ? BigDecimal.ZERO : value;
+    }
+
+    private String formatMoney(BigDecimal value) {
+        BigDecimal safeValue = value == null ? BigDecimal.ZERO : value;
+        return MONEY_FORMAT.format(safeValue);
+    }
+
     private void loadFlowChartData() {
         GoodsOption selected = (GoodsOption) goodsSelector.getSelectedItem();
         if (selected == null) {
@@ -346,6 +624,7 @@ public class HomeDashboardPanel extends JPanel {
             "           END) AS LuuLuong " +
             "FROM InOut " +
             "WHERE MaHang = ? " +
+            "  AND NgayPhieu >= ? " +
             "GROUP BY CAST(NgayPhieu AS date) " +
             "ORDER BY Ngay";
 
@@ -357,14 +636,13 @@ public class HomeDashboardPanel extends JPanel {
                 stmt.setString(1, STOCK_ACTION_IN);
                 stmt.setString(2, STOCK_ACTION_OUT);
                 stmt.setInt(3, selected.maHang);
+                stmt.setDate(4, Date.valueOf(getRecentLimitStartDate()));
 
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        Date ngay = rs.getDate("Ngay");
+                        LocalDate ngay = rs.getDate("Ngay").toLocalDate();
                         int luuLuong = rs.getInt("LuuLuong");
-                        if (ngay != null) {
-                            points.add(new FlowPoint(ngay.toLocalDate(), luuLuong));
-                        }
+                        points.add(new FlowPoint(ngay, luuLuong));
                     }
                 }
             }
@@ -390,6 +668,7 @@ public class HomeDashboardPanel extends JPanel {
             "INNER JOIN Goods g ON g.MaHang = i.MaHang " +
             "WHERE i.LoaiPhieu = ? " +
             "  AND COALESCE(g.LaHangBan, 0) <> 0 " +
+            "  AND i.NgayPhieu >= ? " +
             "GROUP BY g.MaHang, g.TenHang " +
             "HAVING SUM(i.SoLuong) > 0 " +
             "ORDER BY SoLuongBan DESC, g.TenHang";
@@ -398,9 +677,12 @@ public class HomeDashboardPanel extends JPanel {
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
              PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setString(1, STOCK_ACTION_OUT);
+            stmt.setDate(2, Date.valueOf(getRecentLimitStartDate()));
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
-                    items.add(new TrendItem(rs.getString("TenHang"), rs.getInt("SoLuongBan")));
+                    String tenHang = rs.getString("TenHang");
+                    int soLuongBan = rs.getInt("SoLuongBan");
+                    items.add(new TrendItem(tenHang, soLuongBan));
                 }
             }
         }
@@ -408,6 +690,10 @@ public class HomeDashboardPanel extends JPanel {
         trendChartPanel.setData(items);
         updateTrendSelectorModel(items);
         applyTrendSelection();
+    }
+
+    private LocalDate getRecentLimitStartDate() {
+        return LocalDate.now().minusMonths(RECENT_MONTH_LIMIT);
     }
 
     private void updateTrendSelectorModel(List<TrendItem> items) {
@@ -477,6 +763,28 @@ public class HomeDashboardPanel extends JPanel {
         }
     }
 
+    private static class ProfitPoint {
+        private final LocalDate date;
+        private final BigDecimal value;
+
+        private ProfitPoint(LocalDate date, BigDecimal value) {
+            this.date = date;
+            this.value = value == null ? BigDecimal.ZERO : value;
+        }
+    }
+
+    private static class RevenueCostPoint {
+        private final String label;
+        private final BigDecimal revenue;
+        private final BigDecimal cost;
+
+        private RevenueCostPoint(String label, BigDecimal revenue, BigDecimal cost) {
+            this.label = label;
+            this.revenue = revenue == null ? BigDecimal.ZERO : revenue;
+            this.cost = cost == null ? BigDecimal.ZERO : cost;
+        }
+    }
+
     private static class TrendItem {
         private final String name;
         private final int value;
@@ -484,6 +792,132 @@ public class HomeDashboardPanel extends JPanel {
         private TrendItem(String name, int value) {
             this.name = name;
             this.value = value;
+        }
+    }
+
+    private static class QuarterRevenueCostChartPanel extends JPanel {
+        private List<RevenueCostPoint> points = Collections.emptyList();
+
+        private QuarterRevenueCostChartPanel() {
+            setOpaque(true);
+            setBackground(UiTheme.SURFACE);
+            setPreferredSize(new Dimension(900, 280));
+            setMinimumSize(new Dimension(700, 260));
+        }
+
+        private void setData(List<RevenueCostPoint> points) {
+            this.points = new ArrayList<>(points);
+            revalidate();
+            repaint();
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+            int left = 68;
+            int right = 24;
+            int top = 44;
+            int bottom = 54;
+            int chartWidth = Math.max(1, getWidth() - left - right);
+            int chartHeight = Math.max(1, getHeight() - top - bottom);
+
+            g2.setColor(UiTheme.SURFACE_ALT);
+            g2.fillRect(left, top, chartWidth, chartHeight);
+
+            drawLegend(g2, left, 14);
+
+            if (points.isEmpty()) {
+                g2.setColor(new Color(118, 126, 145));
+                g2.drawString("Chưa có dữ liệu doanh thu và chi phí trong quý hiện tại.", left + 8, top + 24);
+                g2.dispose();
+                return;
+            }
+
+            double maxValue = getMaxValue();
+            g2.setColor(new Color(206, 214, 230));
+            for (int i = 0; i <= 4; i++) {
+                int y = top + i * chartHeight / 4;
+                g2.drawLine(left, y, left + chartWidth, y);
+                double tickValue = maxValue - maxValue * i / 4.0;
+                g2.setColor(new Color(105, 113, 131));
+                g2.drawString(formatTick(tickValue), 8, y + 4);
+                g2.setColor(new Color(206, 214, 230));
+            }
+
+            int groupCount = points.size();
+            int groupWidth = Math.max(1, chartWidth / Math.max(1, groupCount));
+            int barWidth = Math.max(22, Math.min(56, groupWidth / 5));
+            int pairGap = 8;
+
+            for (int i = 0; i < groupCount; i++) {
+                RevenueCostPoint point = points.get(i);
+                int groupLeft = left + i * groupWidth;
+                int centerX = groupLeft + groupWidth / 2;
+                int revenueHeight = mapValueToHeight(point.revenue.doubleValue(), maxValue, chartHeight);
+                int costHeight = mapValueToHeight(point.cost.doubleValue(), maxValue, chartHeight);
+                int revenueX = centerX - barWidth - pairGap / 2;
+                int costX = centerX + pairGap / 2;
+                int baseY = top + chartHeight;
+
+                g2.setColor(UiTheme.TEAL);
+                g2.fillRect(revenueX, baseY - revenueHeight, barWidth, revenueHeight);
+                g2.setColor(UiTheme.TEAL_DARK);
+                g2.drawRect(revenueX, baseY - revenueHeight, barWidth, revenueHeight);
+
+                g2.setColor(new Color(199, 132, 74));
+                g2.fillRect(costX, baseY - costHeight, barWidth, costHeight);
+                g2.setColor(new Color(146, 76, 27));
+                g2.drawRect(costX, baseY - costHeight, barWidth, costHeight);
+
+                String label = point.label;
+                int labelWidth = g2.getFontMetrics().stringWidth(label);
+                g2.setColor(new Color(95, 104, 124));
+                g2.drawString(label, centerX - labelWidth / 2, baseY + 24);
+            }
+
+            g2.setColor(new Color(50, 57, 73));
+            g2.drawString("Đơn vị: triệu VND", 8, top - 16);
+            g2.dispose();
+        }
+
+        private void drawLegend(Graphics2D g2, int x, int y) {
+            g2.setColor(UiTheme.TEAL);
+            g2.fillRect(x, y, 14, 14);
+            g2.setColor(new Color(50, 57, 73));
+            g2.drawString("Doanh thu", x + 20, y + 12);
+
+            int secondX = x + 118;
+            g2.setColor(new Color(199, 132, 74));
+            g2.fillRect(secondX, y, 14, 14);
+            g2.setColor(new Color(50, 57, 73));
+            g2.drawString("Chi phí", secondX + 20, y + 12);
+        }
+
+        private double getMaxValue() {
+            double maxValue = 0.0;
+            for (RevenueCostPoint point : points) {
+                maxValue = Math.max(maxValue, point.revenue.doubleValue());
+                maxValue = Math.max(maxValue, point.cost.doubleValue());
+            }
+            return Math.max(maxValue, 1.0);
+        }
+
+        private int mapValueToHeight(double value, double maxValue, int chartHeight) {
+            int rawHeight = (int) Math.round(Math.max(0.0, value) / maxValue * chartHeight);
+            return Math.max(value > 0.0 ? 2 : 0, rawHeight);
+        }
+
+        private String formatTick(double value) {
+            if (Math.abs(value) >= 1000.0) {
+                return String.valueOf(Math.round(value));
+            }
+            if (Math.abs(value) >= 10.0) {
+                return String.format(Locale.ROOT, "%.0f", value);
+            }
+            return String.format(Locale.ROOT, "%.1f", value);
         }
     }
 
@@ -598,6 +1032,126 @@ public class HomeDashboardPanel extends JPanel {
         private int mapValueToY(int value, int min, int max, int top, int height) {
             double ratio = (double) (value - min) / (double) (max - min);
             return top + height - (int) Math.round(ratio * height);
+        }
+    }
+
+    private static class MonthlyProfitLineChartPanel extends JPanel {
+        private List<ProfitPoint> points = Collections.emptyList();
+
+        private MonthlyProfitLineChartPanel() {
+            setOpaque(true);
+            setBackground(UiTheme.SURFACE);
+            setPreferredSize(new Dimension(420, 230));
+            setMinimumSize(new Dimension(360, 220));
+        }
+
+        private void setData(List<ProfitPoint> points) {
+            this.points = new ArrayList<>(points);
+            revalidate();
+            repaint();
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+            int left = 58;
+            int right = 18;
+            int top = 28;
+            int bottom = 46;
+            int chartWidth = Math.max(1, getWidth() - left - right);
+            int chartHeight = Math.max(1, getHeight() - top - bottom);
+
+            g2.setColor(UiTheme.SURFACE_ALT);
+            g2.fillRect(left, top, chartWidth, chartHeight);
+
+            if (points.isEmpty()) {
+                g2.setColor(new Color(118, 126, 145));
+                g2.drawString("Chưa có dữ liệu lợi nhuận trong tháng này.", left + 8, top + 24);
+                g2.dispose();
+                return;
+            }
+
+            double min = 0.0;
+            double max = 0.0;
+            for (ProfitPoint point : points) {
+                double value = point.value.doubleValue();
+                min = Math.min(min, value);
+                max = Math.max(max, value);
+            }
+            if (Double.compare(min, max) == 0) {
+                min -= 1.0;
+                max += 1.0;
+            }
+
+            g2.setColor(new Color(206, 214, 230));
+            for (int i = 0; i <= 4; i++) {
+                int y = top + i * chartHeight / 4;
+                g2.drawLine(left, y, left + chartWidth, y);
+                double tickValue = max - (max - min) * i / 4.0;
+                g2.setColor(new Color(105, 113, 131));
+                g2.drawString(formatTick(tickValue), 8, y + 4);
+                g2.setColor(new Color(206, 214, 230));
+            }
+
+            int zeroY = mapValueToY(0.0, min, max, top, chartHeight);
+            g2.setColor(new Color(128, 135, 155));
+            g2.drawLine(left, zeroY, left + chartWidth, zeroY);
+
+            g2.setColor(UiTheme.TEAL);
+            int count = points.size();
+            int previousX = -1;
+            int previousY = -1;
+            for (int i = 0; i < count; i++) {
+                int x = count == 1 ? left + chartWidth / 2 : left + i * chartWidth / (count - 1);
+                int y = mapValueToY(points.get(i).value.doubleValue(), min, max, top, chartHeight);
+
+                if (i > 0) {
+                    g2.drawLine(previousX, previousY, x, y);
+                }
+                previousX = x;
+                previousY = y;
+            }
+
+            g2.setColor(UiTheme.TEAL_DARK);
+            for (int i = 0; i < count; i++) {
+                int x = count == 1 ? left + chartWidth / 2 : left + i * chartWidth / (count - 1);
+                int y = mapValueToY(points.get(i).value.doubleValue(), min, max, top, chartHeight);
+                g2.fillOval(x - 3, y - 3, 6, 6);
+            }
+
+            int labelStep = Math.max(1, count / 6);
+            g2.setColor(new Color(95, 104, 124));
+            for (int i = 0; i < count; i++) {
+                if (i % labelStep != 0 && i != count - 1) {
+                    continue;
+                }
+                int x = count == 1 ? left + chartWidth / 2 : left + i * chartWidth / (count - 1);
+                String label = points.get(i).date.format(DATE_LABEL_FORMAT);
+                int width = g2.getFontMetrics().stringWidth(label);
+                g2.drawString(label, x - width / 2, top + chartHeight + 22);
+            }
+
+            g2.setColor(new Color(50, 57, 73));
+            g2.drawString("Đơn vị: triệu VND", 8, top - 10);
+            g2.dispose();
+        }
+
+        private int mapValueToY(double value, double min, double max, int top, int height) {
+            double ratio = (value - min) / (max - min);
+            return top + height - (int) Math.round(ratio * height);
+        }
+
+        private String formatTick(double value) {
+            if (Math.abs(value) >= 1000.0) {
+                return String.valueOf(Math.round(value));
+            }
+            if (Math.abs(value) >= 10.0) {
+                return String.format(Locale.ROOT, "%.0f", value);
+            }
+            return String.format(Locale.ROOT, "%.1f", value);
         }
     }
 
@@ -728,7 +1282,7 @@ public class HomeDashboardPanel extends JPanel {
             for (int i = 0; i <= 4; i++) {
                 int y = TOP_PADDING + i * chartHeight / 4;
                 g2.drawLine(LEFT_PADDING, y, LEFT_PADDING + chartWidth, y);
-                int tickValue = maxValue - maxValue * i / 4;
+                int tickValue = maxValue - (maxValue * i / 4);
                 g2.setColor(new Color(105, 113, 131));
                 g2.drawString(String.valueOf(tickValue), 10, y + 4);
                 g2.setColor(new Color(206, 214, 230));
@@ -739,35 +1293,18 @@ public class HomeDashboardPanel extends JPanel {
             barBounds.clear();
 
             for (int i = 0; i < count; i++) {
-                TrendItem item = items.get(i);
-                Rectangle bar = calculateBarBounds(i);
-                barBounds.add(bar);
-
+                Rectangle barBound = calculateBarBounds(i);
+                barBounds.add(barBound);
                 boolean isSelected = hasSelection && i == selectedIndex;
-                Composite originalComposite = g2.getComposite();
-                if (hasSelection && !isSelected) {
-                    g2.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.22f));
-                }
+                Color barColor = isSelected ? new Color(26, 188, 156) : UiTheme.TEAL;
+                g2.setColor(barColor);
+                g2.fillRect(barBound.x, barBound.y, barBound.width, barBound.height);
 
-                Color fillColor = isSelected ? UiTheme.TEAL : UiTheme.TEAL_DARK;
-                Color borderColor = isSelected ? new Color(146, 76, 27) : UiTheme.TEAL_DARK;
-                g2.setColor(fillColor);
-                g2.fillRect(bar.x, bar.y, bar.width, bar.height);
-                g2.setColor(borderColor);
-                g2.drawRect(bar.x, bar.y, bar.width, bar.height);
-
-                if (bar.width >= 26) {
-                    String valueText = String.valueOf(item.value);
-                    int valueWidth = g2.getFontMetrics().stringWidth(valueText);
-                    g2.setColor(new Color(72, 81, 100));
-                    g2.drawString(valueText, bar.x + (bar.width - valueWidth) / 2, bar.y - 4);
-                }
-
-                String label = abbreviate(item.name, 15);
-                int textWidth = g2.getFontMetrics().stringWidth(label);
-                g2.setColor(isSelected ? new Color(53, 62, 82) : new Color(95, 104, 124));
-                g2.drawString(label, bar.x + (bar.width - textWidth) / 2, TOP_PADDING + chartHeight + 20);
-                g2.setComposite(originalComposite);
+                TrendItem item = items.get(i);
+                String label = abbreviate(item.name, 12);
+                int width = g2.getFontMetrics().stringWidth(label);
+                g2.setColor(new Color(95, 104, 124));
+                g2.drawString(label, barBound.x + barBound.width / 2 - width / 2, TOP_PADDING + chartHeight + 20);
             }
 
             g2.setColor(new Color(50, 57, 73));

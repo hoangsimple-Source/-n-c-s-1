@@ -1,603 +1,935 @@
-import java.awt.BorderLayout;
-import java.awt.Color;
-import java.awt.Component;
-import java.awt.Cursor;
-import java.awt.Dimension;
-import java.awt.Font;
-import java.awt.Graphics;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
-import java.awt.Rectangle;
-import java.awt.event.ComponentAdapter;
-import java.awt.event.ComponentEvent;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
-import javax.swing.BorderFactory;
-import javax.swing.JButton;
-import javax.swing.JLabel;
-import javax.swing.JOptionPane;
-import javax.swing.JPanel;
-import javax.swing.SwingConstants;
+import java.awt.*;
+import java.awt.event.*;
+import java.sql.*;
+import java.util.*;
+import java.util.List;
+import javax.swing.*;
+import javax.swing.border.*;
 import javax.swing.Timer;
 
+/**
+ * PackagingShippingPanel — giao diện Đóng gói & Vận chuyển.
+ *
+ * Layout 4 cột:
+ *   [1. Hàng hóa đầu vào] → [2. Tổ đóng gói] → [3. Khu vực chờ] → [4. Xe / Điểm giao hàng]
+ *
+ * Quy tắc sức chứa khu vực chờ:
+ *   - Đơn < 70 kg    = 2.5%
+ *   - 70–200 kg      = 5%
+ *   - > 200 kg       = 8%
+ *
+ * Tải trọng xe: tối đa 900 kg/xe, xe tự rời khi đầy, thông báo dạng toast phía dưới.
+ */
 public class PackagingShippingPanel extends JPanel {
     private static final long serialVersionUID = 1L;
 
-    public PackagingShippingPanel() {
-        buildUi();
+    private DashboardPanel dashboard;
+
+    public PackagingShippingPanel() { buildUi(); }
+
+    public void refreshFromDb() {
+        if (dashboard != null) dashboard.pollAndRefresh();
     }
 
     private void buildUi() {
-        setLayout(new BorderLayout(12, 12));
+        setLayout(new BorderLayout(0, 12));
         setBackground(UiTheme.APP_BG);
         setBorder(BorderFactory.createEmptyBorder(16, 16, 16, 16));
 
-        add(
-            UiTheme.pageHeader(
-                "Đóng gói & Vận chuyển",
-                "Theo dõi luồng hàng hóa qua các tổ đóng gói và băng chuyền đến từng điểm giao"
-            ),
-            BorderLayout.NORTH
-        );
-        add(new PackagingFlowPanel(), BorderLayout.CENTER);
+        // Header
+        add(UiTheme.pageHeader(
+            "Đóng gói & Vận chuyển",
+            "Theo dõi luồng hàng hóa từ tổ đóng gói đến các điểm giao hàng"
+        ), BorderLayout.NORTH);
+
+        dashboard = new DashboardPanel();
+        add(dashboard, BorderLayout.CENTER);
     }
 
-    private static final class PackagingFlowPanel extends JPanel {
+    // =========================================================================
+    // DashboardPanel — toàn bộ UI + logic
+    // =========================================================================
+    static final class DashboardPanel extends JPanel {
         private static final long serialVersionUID = 1L;
-        private static final int LANE_COUNT = 4;
-        private static final int ANIMATION_DURATION_MS = 800;
-        private static final int ANIMATION_DELAY_MS = 12;
-        private static final Color DARK_BORDER = new Color(7, 35, 54);
-        private static final Color GOODS_BG = new Color(244, 246, 248);
-        private static final Color GOODS_HIGHLIGHT = new Color(210, 235, 255);
-        private static final Color PACKING_DEFAULT = new Color(37, 99, 235);
-        private static final Color PACKING_ACTIVE = new Color(2, 132, 199);
-        private static final Color PACKING_DONE = new Color(22, 163, 74);
-        private static final String[] DESTINATIONS = {"Hà Nội", "Nghệ An", "Đà Nẵng", "Lâm Đồng", " TP HCM", "Cần Thơ"};
 
-        private final JButton[] goodsButtons = new JButton[LANE_COUNT];
-        private final JPanel[] laneBelts = new JPanel[LANE_COUNT];
-        private final JButton[] packingButtons = new JButton[LANE_COUNT];
-        private final JLabel[] laneStatusLabels = new JLabel[LANE_COUNT];
-        private final JLabel[] laneBadgeLabels = new JLabel[LANE_COUNT];
-        private final LaneStage[] laneStages = new LaneStage[LANE_COUNT];
-        private final JLabel conveyorLabel = new JLabel("Băng chuyền", SwingConstants.CENTER);
-        private final JLabel[] destinationMetricLabels = new JLabel[DESTINATIONS.length];
-        private final JButton[] destinationButtons = new JButton[DESTINATIONS.length];
-        private final JLabel[] destinationBadgeLabels = new JLabel[DESTINATIONS.length];
-        private final JLabel truckPlaceholderLabel = new JLabel("<html><div style='text-align:center;'>Xe vận chuyển<br/>chờ dữ liệu</div></html>", SwingConstants.CENTER);
-        private Timer activeAnimation;
-        private Timer pulseTimer;
-        private float pulseAlpha = 0f;
-        private boolean pulseGrowing = true;
-        private int pulsingLane = -1;
+        // ── DB ───────────────────────────────────────────────────────────────
+        private static final String DRIVER = "com.microsoft.sqlserver.jdbc.SQLServerDriver";
+        private static final String DB_URL = System.getenv().getOrDefault("DB_URL",
+            "jdbc:sqlserver://localhost:1433;databaseName=DACS;encrypt=true;trustServerCertificate=true");
+        private static final String DB_USER = System.getenv().getOrDefault("DB_USER", "sa");
+        private static final String DB_PASS = System.getenv().getOrDefault("DB_PASSWORD", "123456");
 
-        private PackagingFlowPanel() {
-            setLayout(null);
-            setBackground(Color.WHITE);
-            setBorder(BorderFactory.createLineBorder(UiTheme.BORDER));
-            setPreferredSize(new Dimension(980, 560));
-            createLaneComponents();
-            createConveyorComponents();
-            createDestinationComponents();
-            createTruckPlaceholder();
-            addComponentListener(new ComponentAdapter() {
-                @Override
-                public void componentResized(ComponentEvent e) {
-                    layoutFlowComponents();
-                }
-            });
+        private static final String POLL_SQL =
+            "SELECT Id, OrderCode, DestCode, DestName, TeamId, TotalWeight, ItemCount, Status " +
+            "FROM PackagingQueue ORDER BY QueueDate ASC, QueueOrder ASC";
+        private static final String TODAY_SQL =
+            "SELECT COUNT(*) FROM PackagingQueue WHERE QueueDate = CAST(SYSDATETIME() AS date)";
+        private static final String UPDATE_SQL =
+            "UPDATE PackagingQueue SET Status=?, UpdatedAt=SYSDATETIME() WHERE Id=?";
+
+        // ── Hằng số ──────────────────────────────────────────────────────────
+        private static final int    TEAM_COUNT       = 3;
+        private static final double MAX_HOLD_PERCENT = 100.0; // sức chứa khu vực chờ
+        private static final int    HOLD_PROGRESS_SCALE = 10; // 0.1%
+        private static final double MAX_TRUCK_KG     = 900.0;
+        private static final int    TRUCK_RESET_MS   = 15_000;
+        private static final int    COUNTDOWN_MS     = 1_000;
+        private static final int    DB_POLL_MS       = 5_000;
+        private static final String[] DEST_CODES     = {"HN","NA","DN","LD","HC","CT"};
+        private static final String[] DEST_NAMES     = {"Hà Nội","Nghệ An","Đà Nẵng","Lâm Đồng","TP. HCM","Cần Thơ"};
+
+        // ── Dữ liệu ──────────────────────────────────────────────────────────
+        @SuppressWarnings("unchecked")
+        private final Deque<QueueItem>[] teamQueues = new Deque[TEAM_COUNT];
+        private final QueueItem[]        packingNow = new QueueItem[TEAM_COUNT];
+        private final Timer[]            packTimers = new Timer[TEAM_COUNT];
+        private final int[]              packSec    = new int[TEAM_COUNT];
+
+        // Khu vực chờ (dùng chung cho cả 3 tổ)
+        private int holdItemCount = 0;      // số kiện hàng đang ở khu vực chờ
+        private double holdPercentUsed = 0.0; // phần trăm sức chứa đang chiếm
+
+        // Xe theo điểm đến
+        private final double[]          truckKg       = new double[6];
+        private final boolean[]         truckGone     = new boolean[6]; // xe đang đi
+        @SuppressWarnings("unchecked")
+        private final Deque<QueueItem>[] truckOverflow = new Deque[6];
+
+        // Số liệu thống kê
+        private int statTotal, statPacking, statDone, statWaiting;
+
+        // ── UI: 4 stat cards ─────────────────────────────────────────────────
+        private final JLabel lbTotal   = bigStatLabel("0");
+        private final JLabel lbPacking = bigStatLabel("0");
+        private final JLabel lbDone    = bigStatLabel("0");
+        private final JLabel lbWaiting = bigStatLabel("0");
+
+        // ── UI: Cột 1 — Hàng hóa đầu vào ────────────────────────────────────
+        private final JLabel lbQueueCount   = new JLabel("0", SwingConstants.CENTER);
+        private final JLabel lbTodayCount   = new JLabel("Hàng hôm nay         0");
+        private final JLabel lbPendingCount = new JLabel("Chưa xử lý           0");
+
+        // ── UI: Cột 2 — Tổ đóng gói ─────────────────────────────────────────
+        private final JLabel[]  teamStatusBadge = new JLabel[TEAM_COUNT];
+        private final JLabel[]  teamProcessLb   = new JLabel[TEAM_COUNT];
+        private final JLabel[]  teamWaitLb      = new JLabel[TEAM_COUNT];
+        private final JProgressBar[] teamProgress = new JProgressBar[TEAM_COUNT];
+
+        // ── UI: Cột 3 — Khu vực chờ ─────────────────────────────────────────
+        private final JLabel        lbHoldCount    = new JLabel("0", SwingConstants.CENTER);
+        private final JProgressBar  holdProgress   =
+            new JProgressBar(0, (int) (MAX_HOLD_PERCENT * HOLD_PROGRESS_SCALE));
+        private final JLabel        lbLoadingStatus = new JLabel(" ");  // trạng thái chất hàng
+
+        // ── UI: Cột 4 — Xe / Điểm giao hàng ─────────────────────────────────
+        private final JLabel[]  destKgLabel   = new JLabel[6];
+        private final JButton[] destDetailBtn = new JButton[6];
+        private final JLabel[]  destStatusDot = new JLabel[6];
+
+        // ── UI: Toast thông báo xe đi ─────────────────────────────────────────
+        private final JPanel     toastPanel = new JPanel(new BorderLayout());
+        private final JLabel     toastLabel = new JLabel("", SwingConstants.LEFT);
+        private       Timer      toastTimer;
+
+        DashboardPanel() {
+            setLayout(new BorderLayout(0, 12));
+            setBackground(UiTheme.APP_BG);
+
+            for (int i = 0; i < TEAM_COUNT; i++) teamQueues[i] = new ArrayDeque<>();
+            for (int i = 0; i < 6; i++) truckOverflow[i] = new ArrayDeque<>();
+
+            add(buildStatRow(),  BorderLayout.NORTH);
+            add(buildMainRow(),  BorderLayout.CENTER);
+            add(buildToast(),    BorderLayout.SOUTH);
+
+            // Poll DB định kỳ
+            Timer dbTimer = new Timer(DB_POLL_MS, e -> pollAndRefresh());
+            dbTimer.start();
+            new Timer(700, e -> { pollAndRefresh(); ((Timer)e.getSource()).stop(); }).start();
         }
 
-        private void createLaneComponents() {
-            for (int i = 0; i < LANE_COUNT; i++) {
-                final int laneIndex = i;
-                laneStages[i] = LaneStage.AT_SOURCE;
-                laneBadgeLabels[i] = createBadgeLabel("0");
-                goodsButtons[i] = createGoodsButton();
-                laneBelts[i] = createLaneBelt();
-                packingButtons[i] = createPackingButton("Tổ đóng<br/>gói " + (i + 1));
-                laneStatusLabels[i] = createStatusLabel();
-                goodsButtons[i].addActionListener(e -> moveGoodsToPacking(laneIndex));
-                packingButtons[i].addActionListener(e -> moveGoodsToConveyor(laneIndex));
+        // ── Stat row (4 cards) ───────────────────────────────────────────────
+        private JPanel buildStatRow() {
+            JPanel row = new JPanel(new GridLayout(1, 4, 10, 0));
+            row.setOpaque(false);
+            row.add(statCard("Tổng đơn hôm nay",  lbTotal,   UiTheme.TEAL));
+            row.add(statCard("Đang xử lý",         lbPacking, UiTheme.STATUS_PACKING));
+            row.add(statCard("Đã đóng gói",        lbDone,    UiTheme.STATUS_DONE));
+            row.add(statCard("Chờ vận chuyển",     lbWaiting, UiTheme.STATUS_WAITING));
+            return row;
+        }
 
-                add(laneBelts[i]);
-                add(goodsButtons[i]);
-                add(packingButtons[i]);
-                add(laneStatusLabels[i]);
-                add(laneBadgeLabels[i]);
+        private JPanel statCard(String title, JLabel valueLb, Color accentColor) {
+            JPanel card = new JPanel(new BorderLayout(0, 4));
+            card.setBackground(UiTheme.SURFACE);
+            card.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(UiTheme.CARD_BORDER),
+                BorderFactory.createEmptyBorder(14, 16, 14, 16)));
+
+            JLabel titleLb = new JLabel(title);
+            titleLb.setFont(UiTheme.font(Font.PLAIN, 12));
+            titleLb.setForeground(UiTheme.MUTED_TEXT);
+
+            valueLb.setFont(UiTheme.font(Font.BOLD, 30));
+            valueLb.setForeground(accentColor);
+
+            card.add(titleLb, BorderLayout.NORTH);
+            card.add(valueLb, BorderLayout.CENTER);
+            return card;
+        }
+
+        // ── Main row (4 cột) ─────────────────────────────────────────────────
+        private JPanel buildMainRow() {
+            JPanel row = new JPanel(new GridLayout(1, 4, 10, 0));
+            row.setOpaque(false);
+            row.add(buildCol1());
+            row.add(buildCol2());
+            row.add(buildCol3());
+            row.add(buildCol4());
+            return row;
+        }
+
+        // Cột 1 — Hàng hóa đầu vào
+        private JPanel buildCol1() {
+            JPanel card = makeCard("1. HÀNG HÓA ĐẦU VÀO", UiTheme.STATUS_DONE);
+
+            lbQueueCount.setFont(UiTheme.font(Font.BOLD, 52));
+            lbQueueCount.setForeground(UiTheme.STATUS_DONE);
+            lbQueueCount.setAlignmentX(CENTER_ALIGNMENT);
+
+            JLabel subLb = new JLabel("Kiện hàng đang chờ", SwingConstants.CENTER);
+            subLb.setFont(UiTheme.font(Font.PLAIN, 13));
+            subLb.setForeground(UiTheme.MUTED_TEXT);
+
+            lbTodayCount.setFont(UiTheme.font(Font.PLAIN, 12));
+            lbTodayCount.setForeground(UiTheme.TEXT);
+            lbPendingCount.setFont(UiTheme.font(Font.PLAIN, 12));
+            lbPendingCount.setForeground(UiTheme.TEXT);
+
+            JSeparator sep = new JSeparator();
+            sep.setForeground(UiTheme.CARD_BORDER);
+
+            // Panel chứa 2 dòng thống kê, căn trái
+            JPanel statsBottom = new JPanel(new GridLayout(2, 1, 0, 4));
+            statsBottom.setOpaque(false);
+            statsBottom.add(lbTodayCount);
+            statsBottom.add(lbPendingCount);
+
+            JPanel center = new JPanel(new BorderLayout(0, 0));
+            center.setOpaque(false);
+
+            // Phần trên: số lớn + sub text, căn giữa
+            JPanel topArea = new JPanel();
+            topArea.setOpaque(false);
+            topArea.setLayout(new BoxLayout(topArea, BoxLayout.Y_AXIS));
+            topArea.add(Box.createVerticalGlue());
+            topArea.add(centered(lbQueueCount));
+            topArea.add(centered(subLb));
+            topArea.add(Box.createVerticalGlue());
+
+            // Phần dưới: separator + stats căn trái
+            JPanel bottomArea = new JPanel();
+            bottomArea.setOpaque(false);
+            bottomArea.setLayout(new BoxLayout(bottomArea, BoxLayout.Y_AXIS));
+            bottomArea.add(sep);
+            bottomArea.add(Box.createVerticalStrut(8));
+            bottomArea.add(statsBottom);
+
+            center.add(topArea, BorderLayout.CENTER);
+            center.add(bottomArea, BorderLayout.SOUTH);
+            card.add(center, BorderLayout.CENTER);
+            return card;
+        }
+
+        // Cột 2 — Tổ đóng gói (3 tổ)
+        private JPanel buildCol2() {
+            JPanel card = makeCard("2. TỔ ĐÓNG GÓI", UiTheme.STATUS_PACKING);
+            JPanel body = new JPanel(new GridLayout(TEAM_COUNT, 1, 0, 8));
+            body.setOpaque(false);
+            body.setBorder(BorderFactory.createEmptyBorder(4, 0, 4, 0));
+
+            for (int t = 0; t < TEAM_COUNT; t++) {
+                body.add(buildTeamRow(t));
             }
+            card.add(body, BorderLayout.CENTER);
+            return card;
         }
 
-        private void createConveyorComponents() {
-            conveyorLabel.setOpaque(true);
-            conveyorLabel.setBackground(new Color(128, 128, 126));
-            conveyorLabel.setForeground(Color.BLACK);
-            conveyorLabel.setFont(UiTheme.font(Font.PLAIN, 19));
-            conveyorLabel.setVerticalAlignment(SwingConstants.TOP);
-            conveyorLabel.setHorizontalAlignment(SwingConstants.LEFT);
-            conveyorLabel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(DARK_BORDER, 2),
-                BorderFactory.createEmptyBorder(8, 8, 0, 8)
-            ));
-            add(conveyorLabel);
+        private JPanel buildTeamRow(int t) {
+            JPanel row = new JPanel(new BorderLayout(8, 4));
+            row.setBackground(UiTheme.CARD_BG);
+            row.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(UiTheme.CARD_BORDER),
+                BorderFactory.createEmptyBorder(10, 12, 10, 12)));
+
+            // Header: tên tổ + badge trạng thái
+            JPanel header = new JPanel(new BorderLayout());
+            header.setOpaque(false);
+            JLabel nameLb = new JLabel("Tổ đóng gói " + (t + 1));
+            nameLb.setFont(UiTheme.font(Font.BOLD, 13));
+            nameLb.setForeground(UiTheme.TEXT);
+
+            teamStatusBadge[t] = pill("Trống", UiTheme.STATUS_EMPTY, Color.WHITE);
+            header.add(nameLb, BorderLayout.WEST);
+            header.add(teamStatusBadge[t], BorderLayout.EAST);
+
+            // Body: progress bar đếm ngược + info
+            teamProgress[t] = new JProgressBar(0, 100);
+            teamProgress[t].setValue(0);
+            teamProgress[t].setStringPainted(false);
+            teamProgress[t].setBackground(new Color(229, 231, 235));
+            teamProgress[t].setForeground(UiTheme.STATUS_PACKING);
+            teamProgress[t].setPreferredSize(new Dimension(0, 6));
+            teamProgress[t].setBorder(BorderFactory.createEmptyBorder());
+
+            teamProcessLb[t] = new JLabel("Đang xử lý:  —");
+            teamProcessLb[t].setFont(UiTheme.font(Font.PLAIN, 12));
+            teamProcessLb[t].setForeground(UiTheme.MUTED_TEXT);
+
+            teamWaitLb[t] = new JLabel("Chờ:  0");
+            teamWaitLb[t].setFont(UiTheme.font(Font.PLAIN, 12));
+            teamWaitLb[t].setForeground(UiTheme.MUTED_TEXT);
+
+            JPanel info = new JPanel(new GridLayout(2, 1, 0, 2));
+            info.setOpaque(false);
+            info.add(teamProcessLb[t]);
+            info.add(teamWaitLb[t]);
+
+            JPanel body = new JPanel(new BorderLayout(0, 6));
+            body.setOpaque(false);
+            body.add(teamProgress[t], BorderLayout.NORTH);
+            body.add(info, BorderLayout.CENTER);
+
+            row.add(header, BorderLayout.NORTH);
+            row.add(body, BorderLayout.CENTER);
+            return row;
         }
 
-        private void createDestinationComponents() {
-            for (int i = 0; i < DESTINATIONS.length; i++) {
-                final int destinationIndex = i;
-                destinationMetricLabels[i] = createDestinationMetricLabel(destinationIndex == 0 ? "3,500\n/\n100,000" : "");
-                destinationButtons[i] = createDestinationButton(DESTINATIONS[destinationIndex]);
-                destinationButtons[i].addActionListener(e -> showDestinationDetails(destinationIndex));
-                destinationBadgeLabels[i] = createBadgeLabel(destinationIndex == 0 ? "1" : "0");
-                destinationBadgeLabels[i].setToolTipText("Nhấn để xem chi tiết điểm đến");
-                destinationBadgeLabels[i].addMouseListener(new MouseAdapter() {
-                    @Override
-                    public void mouseClicked(MouseEvent e) {
-                        showDestinationDetails(destinationIndex);
+        // Cột 3 — Khu vực chờ
+        private JPanel buildCol3() {
+            JPanel card = makeCard("3. KHU VỰC CHỜ", new Color(139, 92, 246));
+
+            lbHoldCount.setFont(UiTheme.font(Font.BOLD, 52));
+            lbHoldCount.setForeground(new Color(139, 92, 246));
+
+            JLabel subLb = new JLabel("Kiện hàng trên khu vực chờ", SwingConstants.CENTER);
+            subLb.setFont(UiTheme.font(Font.PLAIN, 13));
+            subLb.setForeground(UiTheme.MUTED_TEXT);
+
+            holdProgress.setStringPainted(false);
+            holdProgress.setBackground(new Color(229, 231, 235));
+            holdProgress.setForeground(new Color(139, 92, 246));
+            holdProgress.setPreferredSize(new Dimension(0, 10));
+            holdProgress.setBorder(BorderFactory.createEmptyBorder());
+
+            JLabel capacityLb = new JLabel("Sức chứa tối đa   " + formatPercent(MAX_HOLD_PERCENT));
+            capacityLb.setFont(UiTheme.font(Font.PLAIN, 12));
+            capacityLb.setForeground(UiTheme.MUTED_TEXT);
+
+            // 3 dòng ghi chú riêng biệt, căn trái
+            JLabel note1 = makeNoteLine("< 70 kg  =  2.5%");
+            JLabel note2 = makeNoteLine("70 – 200 kg  =  5%");
+            JLabel note3 = makeNoteLine("> 200 kg  =  8%");
+            JPanel notesPanel = new JPanel(new GridLayout(3, 1, 0, 2));
+            notesPanel.setOpaque(false);
+            notesPanel.add(note1);
+            notesPanel.add(note2);
+            notesPanel.add(note3);
+
+            // Phần trên: số + sub text căn giữa
+            JPanel topArea = new JPanel();
+            topArea.setOpaque(false);
+            topArea.setLayout(new BoxLayout(topArea, BoxLayout.Y_AXIS));
+            topArea.add(Box.createVerticalGlue());
+            topArea.add(centered(lbHoldCount));
+            topArea.add(centered(subLb));
+            topArea.add(Box.createVerticalGlue());
+
+            // Phần dưới: thanh progress + ghi chú, căn trái
+            JPanel bottomArea = new JPanel();
+            bottomArea.setOpaque(false);
+            bottomArea.setLayout(new BoxLayout(bottomArea, BoxLayout.Y_AXIS));
+            lbLoadingStatus.setFont(UiTheme.font(Font.PLAIN, 11));
+            lbLoadingStatus.setForeground(UiTheme.STATUS_PACKING);
+
+            bottomArea.add(capacityLb);
+            bottomArea.add(Box.createVerticalStrut(6));
+            bottomArea.add(holdProgress);
+            bottomArea.add(Box.createVerticalStrut(4));
+            bottomArea.add(lbLoadingStatus);
+            bottomArea.add(Box.createVerticalStrut(4));
+            bottomArea.add(notesPanel);
+
+            JPanel center = new JPanel(new BorderLayout(0, 0));
+            center.setOpaque(false);
+            center.add(topArea, BorderLayout.CENTER);
+            center.add(bottomArea, BorderLayout.SOUTH);
+            card.add(center, BorderLayout.CENTER);
+            return card;
+        }
+
+        private static JLabel makeNoteLine(String text) {
+            JLabel lb = new JLabel(text);
+            lb.setFont(UiTheme.font(Font.PLAIN, 11));
+            lb.setForeground(UiTheme.STATUS_EMPTY);
+            return lb;
+        }
+
+        // Cột 4 — Xe / Điểm giao hàng
+        private JPanel buildCol4() {
+            JPanel card = makeCard("4. XE / ĐIỂM GIAO HÀNG", UiTheme.CARAMEL);
+            JPanel body = new JPanel(new GridLayout(6, 1, 0, 4));
+            body.setOpaque(false);
+            body.setBorder(BorderFactory.createEmptyBorder(4, 0, 4, 0));
+
+            for (int d = 0; d < 6; d++) {
+                body.add(buildDestRow(d));
+            }
+            card.add(body, BorderLayout.CENTER);
+            return card;
+        }
+
+        private JPanel buildDestRow(int d) {
+            JPanel row = new JPanel(new BorderLayout(8, 0));
+            row.setBackground(UiTheme.SURFACE);
+            row.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(UiTheme.CARD_BORDER),
+                BorderFactory.createEmptyBorder(8, 10, 8, 10)));
+
+            // Tên điểm đến
+            JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+            left.setOpaque(false);
+            destStatusDot[d] = new JLabel("●");
+            destStatusDot[d].setFont(UiTheme.font(Font.PLAIN, 14));
+            destStatusDot[d].setForeground(UiTheme.STATUS_EMPTY);
+            JLabel nameLb = new JLabel(DEST_NAMES[d]);
+            nameLb.setFont(UiTheme.font(Font.BOLD, 13));
+            nameLb.setForeground(UiTheme.TEXT);
+            left.add(destStatusDot[d]);
+            left.add(nameLb);
+
+            // Kg / 900
+            destKgLabel[d] = new JLabel("0 / 900", SwingConstants.CENTER);
+            destKgLabel[d].setFont(UiTheme.font(Font.PLAIN, 12));
+            destKgLabel[d].setForeground(UiTheme.MUTED_TEXT);
+
+            // Nút Chi tiết
+            final int di = d;
+            destDetailBtn[d] = new JButton("Chi tiết");
+            UiTheme.styleDetailButton(destDetailBtn[d]);
+            destDetailBtn[d].addActionListener(e -> showDestDetail(di));
+
+            row.add(left, BorderLayout.WEST);
+            row.add(destKgLabel[d], BorderLayout.CENTER);
+            row.add(destDetailBtn[d], BorderLayout.EAST);
+            return row;
+        }
+
+        // ── Toast ─────────────────────────────────────────────────────────────
+        private JPanel buildToast() {
+            toastPanel.setOpaque(false);
+            toastPanel.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
+            toastLabel.setFont(UiTheme.font(Font.PLAIN, 12));
+            toastLabel.setForeground(UiTheme.MUTED_TEXT);
+            toastLabel.setVisible(false);
+            toastPanel.add(toastLabel, BorderLayout.WEST);
+            // Legend cố định bên phải
+            JPanel legend = buildLegend();
+            toastPanel.add(legend, BorderLayout.EAST);
+            return toastPanel;
+        }
+
+        private JPanel buildLegend() {
+            JPanel p = new JPanel(new FlowLayout(FlowLayout.RIGHT, 12, 0));
+            p.setOpaque(false);
+            p.add(legendItem(UiTheme.STATUS_WAITING, "Chờ xử lý"));
+            p.add(legendItem(UiTheme.STATUS_PACKING, "Đang xử lý"));
+            p.add(legendItem(UiTheme.STATUS_DONE,    "Đã hoàn tất"));
+            p.add(legendItem(UiTheme.STATUS_FULL,    "Đầy tải"));
+            p.add(legendItem(UiTheme.STATUS_EMPTY,   "Trống"));
+            return p;
+        }
+
+        private JPanel legendItem(Color color, String text) {
+            JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+            p.setOpaque(false);
+            JLabel dot = new JLabel("●");
+            dot.setFont(UiTheme.font(Font.PLAIN, 14));
+            dot.setForeground(color);
+            JLabel lb = new JLabel(text);
+            lb.setFont(UiTheme.font(Font.PLAIN, 12));
+            lb.setForeground(UiTheme.MUTED_TEXT);
+            p.add(dot);
+            p.add(lb);
+            return p;
+        }
+
+        // ── DB polling ────────────────────────────────────────────────────────
+        void pollAndRefresh() {
+            List<QueueItem> rows = new ArrayList<>();
+            int todayCount = 0;
+            try {
+                ensureDriver();
+                try (Connection c = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS)) {
+                    try (PreparedStatement st = c.prepareStatement(POLL_SQL);
+                         ResultSet rs = st.executeQuery()) {
+                        while (rs.next()) {
+                            rows.add(new QueueItem(
+                                rs.getInt("Id"),
+                                rs.getString("OrderCode"),
+                                rs.getString("DestCode").trim(),
+                                rs.getString("DestName"),
+                                rs.getInt("TeamId"),
+                                rs.getDouble("TotalWeight"),
+                                rs.getInt("ItemCount"),
+                                rs.getString("Status")
+                            ));
+                        }
                     }
-                });
-                add(destinationMetricLabels[i]);
-                add(destinationButtons[i]);
-                add(destinationBadgeLabels[i]);
-            }
+                    try (PreparedStatement st = c.prepareStatement(TODAY_SQL);
+                         ResultSet rs = st.executeQuery()) {
+                        if (rs.next()) todayCount = rs.getInt(1);
+                    }
+                }
+            } catch (SQLException ex) { return; }
+
+            final List<QueueItem> finalRows = rows;
+            final int finalToday = todayCount;
+            SwingUtilities.invokeLater(() -> applyData(finalRows, finalToday));
         }
 
-        private JButton createGoodsButton() {
-            JButton button = new JButton("<html><div style='text-align:center;'>Hàng<br/>hóa</div></html>");
-            button.setFont(UiTheme.font(Font.BOLD, 18));
-            button.setForeground(new Color(35, 43, 56));
-            button.setBackground(GOODS_BG);
-            button.setFocusPainted(false);
-            button.setBorder(BorderFactory.createLineBorder(DARK_BORDER, 2));
-            button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            button.addMouseListener(new MouseAdapter() {
-                @Override
-                public void mouseEntered(MouseEvent e) {
-                    if (button.isEnabled()) button.setBackground(GOODS_HIGHLIGHT);
+        private void applyData(List<QueueItem> rows, int todayCount) {
+            // Đơn chưa theo dõi → thêm vào hàng đợi tổ
+            for (QueueItem item : rows) {
+                if (!"WAITING".equals(item.status)) continue;
+                if (isTracked(item.id)) continue;
+                int ti = item.teamId - 1;
+                if (ti >= 0 && ti < TEAM_COUNT) {
+                    teamQueues[ti].addLast(item);
+                    // Tự động bắt đầu đóng gói nếu tổ rảnh
+                    if (packingNow[ti] == null) startPacking(ti);
                 }
-                @Override
-                public void mouseExited(MouseEvent e) {
-                    button.setBackground(GOODS_BG);
+            }
+
+            // Tính thống kê
+            statTotal   = todayCount;
+            statPacking = 0; statDone = 0; statWaiting = 0;
+            for (QueueItem item : rows) {
+                switch (item.status) {
+                    case "WAITING":  case "PACKING": statPacking++; break;
+                    case "ON_CONVEYOR": statWaiting++; break;
+                    case "AT_DEST": case "SHIPPED": statDone++; break;
+                }
+            }
+            int totalWaiting = 0;
+            for (int t = 0; t < TEAM_COUNT; t++) totalWaiting += teamQueues[t].size();
+
+            // Cập nhật UI thống kê
+            lbTotal.setText(String.valueOf(statTotal));
+            lbPacking.setText(String.valueOf(statPacking));
+            lbDone.setText(String.valueOf(statDone));
+            lbWaiting.setText(String.valueOf(statWaiting));
+            lbQueueCount.setText(String.valueOf(totalWaiting));
+            lbTodayCount.setText(  padRow("Hàng hôm nay",  todayCount));
+            lbPendingCount.setText(padRow("Chưa xử lý",    totalWaiting));
+
+            refreshTeamUi();
+            refreshHoldUi();
+            refreshDestUi();
+        }
+
+        private String padRow(String label, int val) {
+            return "<html><table width='100%'><tr><td>" + label +
+                "</td><td align='right'><b>" + val + "</b></td></tr></table></html>";
+        }
+
+        // ── Đóng gói ──────────────────────────────────────────────────────────
+        private void startPacking(int t) {
+            if (packingNow[t] != null || teamQueues[t].isEmpty()) return;
+            QueueItem item = teamQueues[t].pollFirst();
+            packingNow[t] = item;
+            packSec[t]    = item.itemCount;
+            updateDbStatus(item.id, "PACKING");
+
+            // Cập nhật badge ngay
+            refreshTeamRow(t);
+
+            // Timer đếm ngược
+            if (packTimers[t] != null) packTimers[t].stop();
+            packTimers[t] = new Timer(COUNTDOWN_MS, null);
+            packTimers[t].addActionListener(e -> {
+                packSec[t]--;
+                refreshTeamRow(t);
+                if (packSec[t] <= 0) {
+                    packTimers[t].stop();
+                    finishPacking(t);
                 }
             });
-            return button;
+            packTimers[t].start();
         }
 
-        private JPanel createLaneBelt() {
-            JPanel panel = new JPanel(new BorderLayout());
-            panel.setBackground(new Color(142, 168, 187));
-            panel.setBorder(BorderFactory.createMatteBorder(1, 0, 1, 0, new Color(64, 101, 128)));
-            return panel;
-        }
+        private void finishPacking(int t) {
+            QueueItem item = packingNow[t];
+            if (item == null) return;
 
-        private JButton createPackingButton(String htmlText) {
-            JButton button = new RoundedButton("<html><div style='text-align:center;'>" + htmlText + "</div></html>", 16);
-            button.setFont(UiTheme.font(Font.BOLD, 17));
-            button.setForeground(Color.WHITE);
-            button.setBackground(PACKING_DEFAULT);
-            button.setFocusPainted(false);
-            button.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-            button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            return button;
-        }
+            // Tính phần trăm sức chứa cần chiếm
+            double holdPercent = weightToHoldPercent(item.totalWeight);
 
-        private JLabel createStatusLabel() {
-            JLabel label = new JLabel("Trống", SwingConstants.CENTER);
-            label.setFont(UiTheme.font(Font.PLAIN, 16));
-            label.setForeground(new Color(55, 65, 81));
-            label.setOpaque(false);
-            return label;
-        }
-
-        private JLabel createBadgeLabel(String text) {
-            JLabel label = new CircleLabel(text);
-            label.setFont(UiTheme.font(Font.BOLD, 16));
-            label.setForeground(Color.WHITE);
-            label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            label.setToolTipText("Thông báo trạng thái");
-            label.addMouseListener(new MouseAdapter() {
-                @Override
-                public void mouseClicked(MouseEvent e) {
-                    showLaneNotifications();
-                }
-            });
-            return label;
-        }
-
-        private void createTruckPlaceholder() {
-            truckPlaceholderLabel.setOpaque(true);
-            truckPlaceholderLabel.setBackground(new Color(242, 246, 249));
-            truckPlaceholderLabel.setForeground(UiTheme.MUTED_TEXT);
-            truckPlaceholderLabel.setFont(UiTheme.font(Font.BOLD, 16));
-            truckPlaceholderLabel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createDashedBorder(UiTheme.BORDER, 4.0f, 4.0f),
-                BorderFactory.createEmptyBorder(16, 16, 16, 16)
-            ));
-            add(truckPlaceholderLabel);
-        }
-
-        private JLabel createDestinationMetricLabel(String text) {
-            JLabel label = new JLabel(toMetricHtml(text), SwingConstants.CENTER);
-            label.setFont(UiTheme.font(Font.BOLD, 13));
-            label.setForeground(Color.WHITE);
-            label.setOpaque(true);
-            label.setBackground(new Color(68, 211, 83));
-            label.setBorder(BorderFactory.createMatteBorder(2, 2, 2, 0, DARK_BORDER));
-            return label;
-        }
-
-        private String toMetricHtml(String text) {
-            if (text == null || text.isEmpty()) {
-                return "";
-            }
-            return "<html><div style='text-align:center;'>" + text.replace("\n", "<br/>") + "</div></html>";
-        }
-
-        private JButton createDestinationButton(String text) {
-            JButton button = new JButton(text);
-            button.setFont(UiTheme.font(Font.BOLD, 15));
-            button.setForeground(Color.WHITE);
-            button.setBackground(new Color(198, 78, 18));
-            button.setFocusPainted(false);
-            button.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(DARK_BORDER, 2),
-                BorderFactory.createEmptyBorder(8, 14, 8, 14)
-            ));
-            return button;
-        }
-
-        private void moveGoodsToPacking(int laneIndex) {
-            if (isAnimating() || laneStages[laneIndex] != LaneStage.AT_SOURCE) {
+            if (holdPercentUsed + holdPercent > MAX_HOLD_PERCENT) {
+                // Khu vực chờ đầy — chờ chỗ trống (thử lại sau 2s)
+                Timer retry = new Timer(2000, e -> { finishPacking(t); ((Timer)e.getSource()).stop(); });
+                retry.setRepeats(false);
+                retry.start();
                 return;
             }
-            Rectangle target = getPackingDockBounds(laneIndex);
-            updateLaneState(laneIndex, LaneStage.MOVING_TO_PACKING);
-            startPulse(laneIndex);
-            animateGoods(laneIndex, goodsButtons[laneIndex].getBounds(), target, () -> {
-                stopPulse();
-                goodsButtons[laneIndex].setBackground(GOODS_BG);
-                updateLaneState(laneIndex, LaneStage.AT_PACKING);
-                repaint();
-            });
-        }
 
-        private void moveGoodsToConveyor(int laneIndex) {
-            if (isAnimating() || laneStages[laneIndex] != LaneStage.AT_PACKING) {
-                return;
-            }
-            Rectangle start = getPackingDockBounds(laneIndex);
-            Rectangle target = getConveyorDockBounds(laneIndex);
-            goodsButtons[laneIndex].setBounds(start);
-            goodsButtons[laneIndex].setVisible(true);
-            updateLaneState(laneIndex, LaneStage.MOVING_TO_CONVEYOR);
-            startPulse(laneIndex);
-            animateGoods(laneIndex, start, target, () -> {
-                stopPulse();
-                goodsButtons[laneIndex].setBackground(GOODS_BG);
-                updateLaneState(laneIndex, LaneStage.AT_CONVEYOR);
-                setComponentZOrder(goodsButtons[laneIndex], 0);
-                repaint();
-            });
-        }
+            // Chuyển vào khu vực chờ
+            holdItemCount++;
+            holdPercentUsed += holdPercent;
+            packingNow[t] = null;
+            updateDbStatus(item.id, "ON_CONVEYOR");
+            refreshTeamUi();
+            refreshHoldUi();
 
-        private void animateGoods(int laneIndex, Rectangle from, Rectangle to, Runnable onComplete) {
-            JButton goodsButton = goodsButtons[laneIndex];
-            setComponentZOrder(goodsButton, 0);
+            // Bắt đầu đơn tiếp theo ngay (tổ rảnh) trong khi chờ chất hàng lên xe
+            if (!teamQueues[t].isEmpty()) startPacking(t);
 
-            long startedAt = System.currentTimeMillis();
-            activeAnimation = new Timer(ANIMATION_DELAY_MS, e -> {
-                double elapsed = System.currentTimeMillis() - startedAt;
-                double progress = Math.min(1.0, elapsed / ANIMATION_DURATION_MS);
-                double eased = easeInOut(progress);
-                int x = interpolate(from.x, to.x, eased);
-                int y = interpolate(from.y, to.y, eased);
-                goodsButton.setBounds(x, y, from.width, from.height);
-                repaint();
+            // Delay chất hàng lên xe theo khối lượng: <70kg=5s, 70-200kg=7s, >200kg=10s
+            int delaySec = loadingDelaySec(item.totalWeight);
+            final int[] secLeft = {delaySec};
+            lbLoadingStatus.setText("Đang chất hàng lên xe: " + delaySec + "s...");
 
-                if (progress >= 1.0) {
-                    activeAnimation.stop();
-                    activeAnimation = null;
-                    goodsButton.setBounds(to);
-                    onComplete.run();
-                }
-            });
-            activeAnimation.start();
-        }
-
-        private void startPulse(int laneIndex) {
-            pulsingLane = laneIndex;
-            pulseAlpha = 0f;
-            pulseGrowing = true;
-            if (pulseTimer != null) pulseTimer.stop();
-            pulseTimer = new Timer(30, e -> {
-                if (pulseGrowing) {
-                    pulseAlpha += 0.08f;
-                    if (pulseAlpha >= 1f) { pulseAlpha = 1f; pulseGrowing = false; }
+            Timer loadTimer = new Timer(1000, null);
+            loadTimer.addActionListener(e -> {
+                secLeft[0]--;
+                if (secLeft[0] > 0) {
+                    lbLoadingStatus.setText("Đang chất hàng lên xe: " + secLeft[0] + "s...");
                 } else {
-                    pulseAlpha -= 0.08f;
-                    if (pulseAlpha <= 0f) { pulseAlpha = 0f; pulseGrowing = true; }
-                }
-                if (pulsingLane >= 0) {
-                    goodsButtons[pulsingLane].setBackground(interpolateColor(GOODS_BG, GOODS_HIGHLIGHT, pulseAlpha));
+                    loadTimer.stop();
+                    lbLoadingStatus.setText(" ");
+                    placeOnTruck(item, holdPercent);
                 }
             });
-            pulseTimer.start();
+            loadTimer.start();
         }
 
-        private void stopPulse() {
-            if (pulseTimer != null) { pulseTimer.stop(); pulseTimer = null; }
-            pulsingLane = -1;
+        private int loadingDelaySec(double kg) {
+            if (kg < 70)   return 5;
+            if (kg <= 200) return 7;
+            return 10;
         }
 
-        private Color interpolateColor(Color a, Color b, float t) {
-            int r = (int)(a.getRed()   + (b.getRed()   - a.getRed())   * t);
-            int g = (int)(a.getGreen() + (b.getGreen() - a.getGreen()) * t);
-            int bl = (int)(a.getBlue() + (b.getBlue()  - a.getBlue())  * t);
-            return new Color(Math.min(255, r), Math.min(255, g), Math.min(255, bl));
+        private double weightToHoldPercent(double kg) {
+            if (kg < 70)  return 2.5;
+            if (kg <= 200) return 5.0;
+            return 8.0;
         }
 
-        private boolean isAnimating() {
-            return activeAnimation != null && activeAnimation.isRunning();
-        }
+        // ── Xe ────────────────────────────────────────────────────────────────
+        private void placeOnTruck(QueueItem item, double holdPercent) {
+            int di = destIdx(item.destCode);
+            if (di < 0) { releaseHoldSpace(holdPercent); return; }
 
-        private int interpolate(int from, int to, double progress) {
-            return (int) Math.round(from + (to - from) * progress);
-        }
-
-        private double easeInOut(double progress) {
-            return progress < 0.5
-                ? 2 * progress * progress
-                : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-        }
-
-        private Rectangle getPackingDockBounds(int laneIndex) {
-            Rectangle packing = packingButtons[laneIndex].getBounds();
-            Rectangle goods = goodsButtons[laneIndex].getBounds();
-            return new Rectangle(
-                packing.x + (packing.width - goods.width) / 2,
-                packing.y + (packing.height - goods.height) / 2,
-                goods.width,
-                goods.height
-            );
-        }
-
-        private Rectangle getConveyorDockBounds(int laneIndex) {
-            Rectangle conveyor = conveyorLabel.getBounds();
-            Rectangle goods = goodsButtons[laneIndex].getBounds();
-            int y = laneBelts[laneIndex].getY() + (laneBelts[laneIndex].getHeight() - goods.height) / 2;
-            return new Rectangle(
-                conveyor.x + (conveyor.width - goods.width) / 2,
-                y,
-                goods.width,
-                goods.height
-            );
-        }
-
-        private void updateLaneState(int laneIndex, LaneStage stage) {
-            laneStages[laneIndex] = stage;
-            switch (stage) {
-                case AT_SOURCE:
-                    laneStatusLabels[laneIndex].setText("Trống");
-                    laneBadgeLabels[laneIndex].setText("0");
-                    packingButtons[laneIndex].setBackground(PACKING_DEFAULT);
-                    break;
-                case MOVING_TO_PACKING:
-                    laneStatusLabels[laneIndex].setText("Đang vận chuyển");
-                    packingButtons[laneIndex].setBackground(PACKING_ACTIVE);
-                    break;
-                case AT_PACKING:
-                    laneStatusLabels[laneIndex].setText("Đang đóng gói");
-                    laneBadgeLabels[laneIndex].setText("1");
-                    packingButtons[laneIndex].setBackground(PACKING_ACTIVE);
-                    break;
-                case MOVING_TO_CONVEYOR:
-                    laneStatusLabels[laneIndex].setText("Lên băng chuyền");
-                    packingButtons[laneIndex].setBackground(PACKING_DONE);
-                    break;
-                case AT_CONVEYOR:
-                    laneStatusLabels[laneIndex].setText("Trống");
-                    laneBadgeLabels[laneIndex].setText("0");
-                    packingButtons[laneIndex].setBackground(PACKING_DEFAULT);
-                    break;
-                default:
-                    break;
-            }
-        }
-
-        private void showLaneNotifications() {
-            StringBuilder message = new StringBuilder();
-            for (int i = 0; i < LANE_COUNT; i++) {
-                message
-                    .append("Làn ")
-                    .append(i + 1)
-                    .append(": ")
-                    .append(laneStatusLabels[i].getText())
-                    .append('\n');
-            }
-            JOptionPane.showMessageDialog(
-                this,
-                message.toString(),
-                "Thông báo đóng gói",
-                JOptionPane.INFORMATION_MESSAGE
-            );
-        }
-
-        private void showDestinationDetails(int destinationIndex) {
-            JOptionPane.showMessageDialog(
-                this,
-                "Điểm đến: " + DESTINATIONS[destinationIndex] + "\n" +
-                "Số đơn hiện tại: " + destinationBadgeLabels[destinationIndex].getText() + "\n" +
-                "Tình trạng băng chuyền: " + (destinationMetricLabels[destinationIndex].getText().isEmpty() ? "Chưa có dữ liệu" : "Hoạt động"),
-                "Thông báo điểm đến",
-                JOptionPane.INFORMATION_MESSAGE
-            );
-        }
-
-        private void layoutFlowComponents() {
-            int w = getWidth();
-            int h = getHeight();
-            if (w <= 0 || h <= 0) {
+            if (truckGone[di]) {
+                // Xe đang đợi thay — đơn vào overflow chờ xe mới
+                truckOverflow[di].addLast(item);
+                updateDbStatus(item.id, "AT_DEST");
+                releaseHoldSpace(holdPercent);
+                refreshHoldUi();
                 return;
             }
 
-            int left = Math.max(24, w / 28);
-            int top = Math.max(48, h / 12);
-            int laneGap = Math.max(112, (h - top - 70) / LANE_COUNT);
-            int goodsW = 100;
-            int goodsH = 58;
-            int beltH = 38;
-            int packW = 130;
-            int packH = 80;
-            int conveyorW = 120;
-            int metricW = 88;
-            int destinationW = 130;
-            int destinationH = 58;
-            int badgeSize = 38;
-
-            int destinationX = Math.max(w - destinationW - 24, left + 760);
-            int metricX = destinationX - metricW - 8;
-            int conveyorX = metricX - conveyorW - 16;
-            int packX = left + goodsW + 76;
-            int beltStartX = left + goodsW;
-            int beltEndX = conveyorX - 8;
-            int statusX = packX + packW + 24;
-            int statusW = Math.max(120, beltEndX - statusX - 12);
-
-            for (int i = 0; i < LANE_COUNT; i++) {
-                int centerY = top + i * laneGap;
-                laneBelts[i].setBounds(beltStartX, centerY - beltH / 2, Math.max(60, beltEndX - beltStartX), beltH);
-                packingButtons[i].setBounds(packX, centerY - packH / 2, packW, packH);
-                laneStatusLabels[i].setBounds(statusX, centerY - 24, statusW, 48);
-                laneBadgeLabels[i].setBounds(left + goodsW - 20, centerY - goodsH / 2 - 22, badgeSize, badgeSize);
-                setComponentZOrder(laneBelts[i], getComponentCount() - 1);
-                if (!isAnimating()) {
-                    layoutGoodsByState(i, left, centerY, goodsW, goodsH);
+            double newKg = truckKg[di] + item.totalWeight;
+            if (newKg > MAX_TRUCK_KG) {
+                if (truckKg[di] > 0) {
+                    // Trường hợp: xe đang có hàng, thêm đơn này sẽ vượt tải trọng
+                    // → Thông báo cụ thể, xe đi ngay với tải hiện tại, đơn chờ xe mới
+                    showToast("Xe " + DEST_NAMES[di]
+                        + " hiện không thể tải được đơn " + item.orderCode
+                        + " (" + String.format("%.0f", item.totalWeight) + " kg)"
+                        + " vì vượt quá tổng tải trọng."
+                        + " Bạn phải đợi xe khác.");
+                    truckDeparture(di, item, holdPercent, false); // xe đi, đơn chờ xe sau
+                } else {
+                    // Trường hợp hiếm: xe trống nhưng một đơn đã > 900kg
+                    // → Vẫn tải lên (không có lựa chọn nào khác)
+                    truckKg[di] = item.totalWeight;
+                    releaseHoldSpace(holdPercent);
+                    updateDbStatus(item.id, "AT_DEST");
+                    refreshDestUi();
+                    refreshHoldUi();
                 }
-                setComponentZOrder(laneBadgeLabels[i], 0);
-            }
-
-            int conveyorTop = top - 80;
-            int conveyorBottom = top + (LANE_COUNT - 1) * laneGap + 76;
-            conveyorLabel.setBounds(conveyorX, conveyorTop, conveyorW, Math.min(h - conveyorTop - 16, conveyorBottom - conveyorTop));
-
-            int destinationTop = conveyorTop + 58;
-            int destinationGap = Math.max(90, (conveyorLabel.getHeight() - 54) / DESTINATIONS.length);
-            for (int i = 0; i < DESTINATIONS.length; i++) {
-                int centerY = destinationTop + i * destinationGap;
-                destinationMetricLabels[i].setBounds(metricX, centerY - destinationH / 2, metricW, destinationH);
-                destinationButtons[i].setBounds(destinationX, centerY - destinationH / 2, destinationW, destinationH);
-                destinationBadgeLabels[i].setBounds(destinationX + destinationW - 24, centerY - destinationH / 2 - 16, badgeSize, badgeSize);
-                setComponentZOrder(destinationBadgeLabels[i], 0);
-            }
-
-            int truckW = 160;
-            int truckH = 96;
-            int truckX = destinationX + destinationW + 24;
-            int truckY = destinationTop;
-            if (truckX + truckW + 24 > w) {
-                truckX = Math.max(left, w - truckW - 24);
-                truckY = destinationTop + destinationGap * DESTINATIONS.length + 16;
-            }
-            truckPlaceholderLabel.setBounds(truckX, truckY, truckW, truckH);
-            truckPlaceholderLabel.setVisible(true);
-        }
-
-        private void layoutGoodsByState(int laneIndex, int sourceX, int centerY, int goodsW, int goodsH) {
-            Rectangle source = new Rectangle(sourceX, centerY - goodsH / 2, goodsW, goodsH);
-            LaneStage stage = laneStages[laneIndex];
-            if (stage == LaneStage.AT_PACKING) {
-                goodsButtons[laneIndex].setBounds(centeredBounds(source, packingButtons[laneIndex].getBounds()));
-                goodsButtons[laneIndex].setVisible(true);
-            } else if (stage == LaneStage.AT_CONVEYOR) {
-                goodsButtons[laneIndex].setBounds(getConveyorDockBounds(laneIndex));
-                goodsButtons[laneIndex].setVisible(true);
+            } else if (newKg == MAX_TRUCK_KG) {
+                // Vừa đủ tải — tải lên rồi xe đi ngay
+                truckKg[di] = newKg;
+                releaseHoldSpace(holdPercent);
+                updateDbStatus(item.id, "AT_DEST");
+                truckDeparture(di, null, 0, true); // xe đầy, đi ngay, không có đơn trigger
             } else {
-                goodsButtons[laneIndex].setBounds(source);
-                goodsButtons[laneIndex].setVisible(true);
+                // Còn chỗ — tải bình thường
+                truckKg[di] = newKg;
+                releaseHoldSpace(holdPercent);
+                updateDbStatus(item.id, "AT_DEST");
+                refreshDestUi();
+                refreshHoldUi();
             }
-            setComponentZOrder(goodsButtons[laneIndex], 0);
         }
 
-        private Rectangle centeredBounds(Rectangle sizeSource, Rectangle anchor) {
-            return new Rectangle(
-                anchor.x + (anchor.width - sizeSource.width) / 2,
-                anchor.y + (anchor.height - sizeSource.height) / 2,
-                sizeSource.width,
-                sizeSource.height
-            );
-        }
-
-        @Override
-        public void doLayout() {
-            super.doLayout();
-            layoutFlowComponents();
-        }
-
-        @Override
-        public Component add(Component comp) {
-            Component added = super.add(comp);
-            layoutFlowComponents();
-            return added;
-        }
-
-        /*
-         * Animation contract for future shipping-to-truck work:
-         * 1. Goods button is the animated cargo block for each lane.
-         * 2. LaneStage.AT_CONVEYOR is the stable extension point after real order
-         *    data is attached.
-         * 3. The next animation should start from getConveyorDockBounds(laneIndex)
-         *    and route toward a truck/destination component without resetting the
-         *    source or packing states.
+        /**
+         * Điều xe đi ngay.
+         * @param triggerItem  đơn không vừa (sẽ vào overflow), null nếu xe vừa đủ tải
+         * @param holdPercentToRelease  phần trăm khu vực chờ cần giải phóng cho triggerItem
+         * @param naturalFull  true = xe đầy tự nhiên, false = xe đi do đơn mới không vừa
          */
-        private enum LaneStage {
-            AT_SOURCE,
-            MOVING_TO_PACKING,
-            AT_PACKING,
-            MOVING_TO_CONVEYOR,
-            AT_CONVEYOR
+        private void truckDeparture(int di, QueueItem triggerItem,
+                                    double holdPercentToRelease, boolean naturalFull) {
+            if (triggerItem != null) {
+                // Đơn không vừa → chờ xe mới
+                truckOverflow[di].addLast(triggerItem);
+                updateDbStatus(triggerItem.id, "AT_DEST");
+                releaseHoldSpace(holdPercentToRelease);
+            }
+
+            double departedKg = truckKg[di];
+            truckKg[di]   = 0;
+            truckGone[di] = true;
+            refreshDestUi();
+            refreshHoldUi();
+
+            if (naturalFull) {
+                showToast("Xe đến " + DEST_NAMES[di]
+                    + " đã rời đi vì đạt đủ tải trọng ("
+                    + String.format("%.0f", departedKg) + " kg)."
+                    + " Xe tiếp theo sẽ đến sau 15s.");
+            }
+            // Trường hợp không phải naturalFull: toast đã hiện trước đó trong placeOnTruck
+
+            // Xe mới sau 15s
+            Timer t = new Timer(TRUCK_RESET_MS, e -> {
+                ((Timer)e.getSource()).stop();
+                SwingUtilities.invokeLater(() -> resetTruck(di));
+            });
+            t.setRepeats(false);
+            t.start();
         }
 
-        private static final class RoundedButton extends JButton {
-            private static final long serialVersionUID = 1L;
-            private final int arc;
-
-            private RoundedButton(String text, int arc) {
-                super(text);
-                this.arc = arc;
-                setOpaque(false);
-                setContentAreaFilled(false);
+        private void resetTruck(int di) {
+            truckGone[di] = false;
+            showToast("Xe mới đến " + DEST_NAMES[di] + " đã sẵn sàng nhận hàng.");
+            // Nạp overflow vào xe mới
+            while (!truckOverflow[di].isEmpty()) {
+                QueueItem nxt = truckOverflow[di].peekFirst();
+                if (truckKg[di] + nxt.totalWeight > MAX_TRUCK_KG) {
+                    // Đơn đầu tiên trong overflow cũng không vừa xe mới
+                    truckOverflow[di].pollFirst();
+                    showToast("Xe " + DEST_NAMES[di]
+                        + " hiện không thể tải được đơn " + nxt.orderCode
+                        + " (" + String.format("%.0f", nxt.totalWeight) + " kg)"
+                        + " vì vượt quá tổng tải trọng. Bạn phải đợi xe khác.");
+                    truckDeparture(di, nxt, 0, false);
+                    return;
+                }
+                truckOverflow[di].pollFirst();
+                truckKg[di] += nxt.totalWeight;
+                updateDbStatus(nxt.id, "SHIPPED");
             }
+            refreshDestUi();
+        }
 
-            @Override
-            protected void paintComponent(Graphics g) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                g2.setColor(getBackground());
-                g2.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, arc, arc);
-                g2.dispose();
-                super.paintComponent(g);
+        // ── Chi tiết xe ───────────────────────────────────────────────────────
+        private void showDestDetail(int di) {
+            String status = truckGone[di] ? "⏳ Đang đợi xe mới"
+                : truckKg[di] > MAX_TRUCK_KG * 0.85 ? "⚠️ Gần đầy"
+                : "✅ Sẵn sàng";
+
+            JOptionPane.showMessageDialog(this,
+                "Điểm đến:      " + DEST_NAMES[di] + "\n" +
+                "Tải hiện tại:  " + String.format("%.1f / %.0f kg", truckKg[di], MAX_TRUCK_KG) + "\n" +
+                "Đơn đang chờ:  " + truckOverflow[di].size() + "\n" +
+                "Trạng thái:    " + status,
+                "Chi tiết — " + DEST_NAMES[di],
+                JOptionPane.INFORMATION_MESSAGE);
+        }
+
+        // ── Toast ─────────────────────────────────────────────────────────────
+        private void showToast(String msg) {
+            toastLabel.setText(msg);
+            toastLabel.setForeground(UiTheme.WARNING);
+            toastLabel.setVisible(true);
+            if (toastTimer != null) toastTimer.stop();
+            toastTimer = new Timer(8000, e -> {
+                toastLabel.setVisible(false);
+                ((Timer)e.getSource()).stop();
+            });
+            toastTimer.setRepeats(false);
+            toastTimer.start();
+        }
+
+        // ── Refresh UI ────────────────────────────────────────────────────────
+        private void refreshTeamUi() {
+            for (int t = 0; t < TEAM_COUNT; t++) refreshTeamRow(t);
+        }
+
+        private void refreshTeamRow(int t) {
+            QueueItem cur = packingNow[t];
+            int queueSize = teamQueues[t].size();
+            teamWaitLb[t].setText("Chờ:  " + queueSize);
+
+            if (cur == null) {
+                teamStatusBadge[t].setText("Trống");
+                teamStatusBadge[t].setBackground(UiTheme.STATUS_EMPTY);
+                teamProcessLb[t].setText("Đang xử lý:  —");
+                teamProgress[t].setValue(0);
+                teamProgress[t].setForeground(UiTheme.STATUS_EMPTY);
+            } else {
+                int total   = cur.itemCount;
+                int elapsed = total - packSec[t];
+                int pct     = total > 0 ? (int)(100.0 * elapsed / total) : 100;
+
+                if (packSec[t] > 0) {
+                    teamStatusBadge[t].setText("Đang xử lý");
+                    teamStatusBadge[t].setBackground(UiTheme.STATUS_PACKING);
+                    teamProgress[t].setForeground(UiTheme.STATUS_PACKING);
+                } else {
+                    teamStatusBadge[t].setText("Hoàn tất");
+                    teamStatusBadge[t].setBackground(UiTheme.STATUS_DONE);
+                    teamProgress[t].setForeground(UiTheme.STATUS_DONE);
+                }
+                teamProcessLb[t].setText("Đang xử lý:  " + cur.orderCode +
+                    "  (" + packSec[t] + "s còn lại)");
+                teamProgress[t].setValue(pct);
             }
         }
 
-        private static final class CircleLabel extends JLabel {
-            private static final long serialVersionUID = 1L;
+        private void refreshHoldUi() {
+            lbHoldCount.setText(String.valueOf(holdItemCount));
+            int progressValue = (int) Math.round(
+                Math.min(holdPercentUsed, MAX_HOLD_PERCENT) * HOLD_PROGRESS_SCALE);
+            holdProgress.setValue(progressValue);
+            boolean full = holdPercentUsed >= MAX_HOLD_PERCENT;
+            holdProgress.setForeground(full ? UiTheme.STATUS_FULL : new Color(139, 92, 246));
+        }
 
-            private CircleLabel(String text) {
-                super(text, SwingConstants.CENTER);
-                setOpaque(false);
+        private void releaseHoldSpace(double percent) {
+            holdItemCount = Math.max(0, holdItemCount - 1);
+            holdPercentUsed = Math.max(0.0, holdPercentUsed - percent);
+        }
+
+        private static String formatPercent(double percent) {
+            if (Math.abs(percent - Math.rint(percent)) < 0.0001) {
+                return String.format("%.0f%%", percent);
             }
+            return String.format("%.1f%%", percent);
+        }
 
-            @Override
-            protected void paintComponent(Graphics g) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                g2.setColor(Color.RED);
-                g2.fillOval(2, 2, getWidth() - 4, getHeight() - 4);
-                g2.setColor(DARK_BORDER);
-                g2.drawOval(2, 2, getWidth() - 4, getHeight() - 4);
-                g2.dispose();
-                super.paintComponent(g);
+        private void refreshDestUi() {
+            for (int d = 0; d < 6; d++) {
+                double kg = truckKg[d];
+                boolean gone = truckGone[d];
+                destKgLabel[d].setText(String.format("%.0f / 900", kg));
+                if (gone) {
+                    destStatusDot[d].setForeground(UiTheme.STATUS_WAITING);
+                } else if (kg > MAX_TRUCK_KG * 0.85) {
+                    destStatusDot[d].setForeground(UiTheme.STATUS_FULL);
+                } else if (kg > 0) {
+                    destStatusDot[d].setForeground(UiTheme.STATUS_PACKING);
+                } else {
+                    destStatusDot[d].setForeground(UiTheme.STATUS_EMPTY);
+                }
+            }
+        }
+
+        // ── Helpers ───────────────────────────────────────────────────────────
+        private boolean isTracked(int id) {
+            for (int t = 0; t < TEAM_COUNT; t++) {
+                if (packingNow[t] != null && packingNow[t].id == id) return true;
+                for (QueueItem q : teamQueues[t]) if (q.id == id) return true;
+            }
+            for (Deque<QueueItem> dq : truckOverflow)
+                for (QueueItem q : dq) if (q.id == id) return true;
+            return false;
+        }
+
+        private int destIdx(String code) {
+            for (int i = 0; i < DEST_CODES.length; i++)
+                if (DEST_CODES[i].equals(code)) return i;
+            return -1;
+        }
+
+        private void updateDbStatus(int id, String status) {
+            Thread th = new Thread(() -> {
+                try {
+                    ensureDriver();
+                    try (Connection c = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
+                         PreparedStatement st = c.prepareStatement(UPDATE_SQL)) {
+                        st.setString(1, status);
+                        st.setInt(2, id);
+                        st.executeUpdate();
+                    }
+                } catch (SQLException ignored) {}
+            }, "db-update");
+            th.setDaemon(true);
+            th.start();
+        }
+
+        private void ensureDriver() throws SQLException {
+            try { Class.forName(DRIVER); }
+            catch (ClassNotFoundException e) { throw new SQLException("Không tìm thấy JDBC driver.", e); }
+        }
+
+        // ── Factory helpers ───────────────────────────────────────────────────
+        private static JPanel makeCard(String title, Color accentColor) {
+            JPanel card = new JPanel(new BorderLayout(0, 10));
+            card.setBackground(UiTheme.SURFACE);
+            card.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(UiTheme.CARD_BORDER),
+                BorderFactory.createEmptyBorder(14, 14, 14, 14)));
+
+            JLabel titleLb = new JLabel(title);
+            titleLb.setFont(UiTheme.font(Font.BOLD, 12));
+            titleLb.setForeground(accentColor);
+            titleLb.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, UiTheme.CARD_BORDER));
+            titleLb.setPreferredSize(new Dimension(0, 28));
+            card.add(titleLb, BorderLayout.NORTH);
+            return card;
+        }
+
+        private static JLabel bigStatLabel(String text) {
+            JLabel lb = new JLabel(text, SwingConstants.LEFT);
+            lb.setFont(UiTheme.font(Font.BOLD, 30));
+            return lb;
+        }
+
+        private static JLabel pill(String text, Color bg, Color fg) {
+            JLabel lb = new JLabel(text, SwingConstants.CENTER);
+            lb.setFont(UiTheme.font(Font.BOLD, 11));
+            lb.setForeground(fg);
+            lb.setOpaque(true);
+            lb.setBackground(bg);
+            lb.setBorder(BorderFactory.createEmptyBorder(3, 8, 3, 8));
+            return lb;
+        }
+
+        private static Component centered(JComponent c) {
+            c.setAlignmentX(CENTER_ALIGNMENT);
+            JPanel p = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 2));
+            p.setOpaque(false);
+            p.add(c);
+            return p;
+        }
+
+        // ── Data model ────────────────────────────────────────────────────────
+        static final class QueueItem {
+            final int    id, teamId, itemCount;
+            final String orderCode, destCode, destName, status;
+            final double totalWeight;
+
+            QueueItem(int id, String orderCode, String destCode, String destName,
+                      int teamId, double totalWeight, int itemCount, String status) {
+                this.id = id; this.orderCode = orderCode; this.destCode = destCode;
+                this.destName = destName; this.teamId = teamId;
+                this.totalWeight = totalWeight; this.itemCount = itemCount;
+                this.status = status;
             }
         }
     }
