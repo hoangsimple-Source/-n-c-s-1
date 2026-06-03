@@ -15,6 +15,22 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 
+import sources
+import sources copy.OrderPlacementPanel;
+import sources copy.StockCheckPanel;
+import sources copy.UiTheme;
+import sources copy.OrderPlacementPanel;
+import sources copy.StockCheckPanel;
+import sources copy.UiTheme;
+import sources copy.OrderPlacementPanel;
+import sources copy.StockCheckPanel;
+import sources copy.UiTheme;
+import sources copy.OrderPlacementPanel;
+import sources copy.StockCheckPanel;
+import sources copy.UiTheme;
+import sources copy.StockCheckPanel;
+import sources copy.UiTheme;
+
 
 public class MainMenuFrame extends JFrame {
     private static final String APP_TITLE = "Hệ thống quản lí kinh doanh nội bộ công ty TECOFFEE";
@@ -46,7 +62,7 @@ public class MainMenuFrame extends JFrame {
     private final JPanel contentPanel;
     private final Map<String, JButton> menuButtons = new LinkedHashMap<>();
     private final StockCheckPanel stockCheckPanel;
-    private final JPanel homeInfo;
+    private final HomeInfo homeInfoPanel;
     private final ProfitStatisticsPanel profitStatisticsPanel;
     private final OrderPlacementPanel orderPlacementPanel;
     private final JPanel orderReceivingPanel;
@@ -62,8 +78,8 @@ public class MainMenuFrame extends JFrame {
         JPanel root = new JPanel(new BorderLayout());
         root.setBackground(UiTheme.APP_BG);
         root.add(buildLeftMenu(managerId, managerName), BorderLayout.WEST);
-
-        homeInfo = createHomeInfoPanel();
+        
+        homeInfoPanel = new HomeInfo(managerId, managerName);
         profitStatisticsPanel = new ProfitStatisticsPanel(managerId, managerName);
         orderPlacementPanel = new OrderPlacementPanel(() -> showCard(CARD_ORDER_RECEIVING));
         orderReceivingPanel = createPanelSafely("OrderReceivingPanel");
@@ -80,7 +96,7 @@ public class MainMenuFrame extends JFrame {
         contentLayout = new CardLayout();
         contentPanel = new JPanel(contentLayout);
         contentPanel.setBackground(UiTheme.APP_BG);
-        contentPanel.add(homeInfo, CARD_HOME);
+        contentPanel.add(homeInfoPanel, CARD_HOME);
         contentPanel.add(orderPlacementPanel, CARD_ORDER_PLACEMENT);
         contentPanel.add(orderReceivingPanel, CARD_ORDER_RECEIVING);
         contentPanel.add(stockCheckPanel, CARD_STOCK_CHECK);
@@ -246,7 +262,7 @@ public class MainMenuFrame extends JFrame {
 
     private void showCard(String cardName) {
         if (CARD_HOME.equals(cardName)) {
-            // Home panel is now empty placeholder
+            homeInfoPanel.refreshData();
         }
         if (CARD_STOCK_CHECK.equals(cardName)) {
             stockCheckPanel.refreshData();
