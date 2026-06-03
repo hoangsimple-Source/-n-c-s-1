@@ -46,7 +46,7 @@ public class MainMenuFrame extends JFrame {
     private final JPanel contentPanel;
     private final Map<String, JButton> menuButtons = new LinkedHashMap<>();
     private final StockCheckPanel stockCheckPanel;
-    private final JPanel homeInfoPanel;
+    private final JPanel homeInfo;
     private final ProfitStatisticsPanel profitStatisticsPanel;
     private final OrderPlacementPanel orderPlacementPanel;
     private final JPanel orderReceivingPanel;
@@ -63,7 +63,7 @@ public class MainMenuFrame extends JFrame {
         root.setBackground(UiTheme.APP_BG);
         root.add(buildLeftMenu(managerId, managerName), BorderLayout.WEST);
 
-        homeInfoPanel = createHomeInfoPanel();
+        homeInfo = createHomeInfoPanel();
         profitStatisticsPanel = new ProfitStatisticsPanel(managerId, managerName);
         orderPlacementPanel = new OrderPlacementPanel(() -> showCard(CARD_ORDER_RECEIVING));
         orderReceivingPanel = createPanelSafely("OrderReceivingPanel");
@@ -80,7 +80,7 @@ public class MainMenuFrame extends JFrame {
         contentLayout = new CardLayout();
         contentPanel = new JPanel(contentLayout);
         contentPanel.setBackground(UiTheme.APP_BG);
-        contentPanel.add(homeInfoPanel, CARD_HOME);
+        contentPanel.add(homeInfo, CARD_HOME);
         contentPanel.add(orderPlacementPanel, CARD_ORDER_PLACEMENT);
         contentPanel.add(orderReceivingPanel, CARD_ORDER_RECEIVING);
         contentPanel.add(stockCheckPanel, CARD_STOCK_CHECK);
