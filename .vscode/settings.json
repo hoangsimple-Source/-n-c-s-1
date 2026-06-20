@@ -9,6 +9,7 @@
   ],
   "code-runner.executorMap": {
     "java": "cd \"$workspaceRoot\" && javac -encoding UTF-8 -cp \".;lib/*\" -d bin \"$file\" && java -cp \".;bin;lib/*\" \"$fileNameWithoutExt\""
-  }
+  },
+  "java.debug.settings.onBuildFailureProceed": true
 }
 

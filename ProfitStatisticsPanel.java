@@ -879,7 +879,7 @@ public class ProfitStatisticsPanel extends JPanel {
             }
 
             g2.setColor(new Color(50, 57, 73));
-            g2.drawString("Đơn vị: triệu VND", 8, top - 16);
+            g2.drawString("Đơn vị: MVND", 7, top - 16);
             g2.dispose();
         }
 

@@ -366,7 +366,7 @@ public class StockCheckPanel extends JPanel {
         gbc.fill   = GridBagConstraints.HORIZONTAL;
 
         Object[][] rows = {
-            {"Mã hàng (để trống nếu tự tăng):", maHangField},
+            {"Mã hàng:",                         maHangField},
             {"Tên hàng:",                        tenHangField},
             {"Đơn vị tính:",                     donViTinhField},
             {"Khối lượng (kg):",                 khoiLuongField},   // ← hàng mới

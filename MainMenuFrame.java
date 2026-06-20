@@ -15,23 +15,6 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 
-import sources
-import sources copy.OrderPlacementPanel;
-import sources copy.StockCheckPanel;
-import sources copy.UiTheme;
-import sources copy.OrderPlacementPanel;
-import sources copy.StockCheckPanel;
-import sources copy.UiTheme;
-import sources copy.OrderPlacementPanel;
-import sources copy.StockCheckPanel;
-import sources copy.UiTheme;
-import sources copy.OrderPlacementPanel;
-import sources copy.StockCheckPanel;
-import sources copy.UiTheme;
-import sources copy.StockCheckPanel;
-import sources copy.UiTheme;
-
-
 public class MainMenuFrame extends JFrame {
     private static final String APP_TITLE = "Hệ thống quản lí kinh doanh nội bộ công ty TECOFFEE";
 
